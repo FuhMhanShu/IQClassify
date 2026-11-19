@@ -24,11 +24,16 @@ void fftInPlace(std::vector<cd>& a, bool invert) {
     if (n == 0) return;
     // pocketfft unterstuetzt beliebige Laengen; die Aufrufer nutzen
     // Zweierpotenzen (Leistungstransformation der Praefixplaene).
-    pocketfft::shape_t shape{n};
+    // shape/stride/axes werden thread-lokal gecacht: assign() allokiert nach
+    // dem ersten Aufruf nicht mehr (bei vielen FFT-Aufrufen merklich).
+    thread_local pocketfft::shape_t shape;
+    thread_local pocketfft::stride_t stride;
+    thread_local pocketfft::shape_t axes;
+    shape.assign(1, n);
     // stride_t ist ein Vektor je Dimension: ein einzelnes Element mit dem
     // Byte-Abstand der Samples (std::complex<double> ist dicht gepackt).
-    pocketfft::stride_t stride{static_cast<ptrdiff_t>(sizeof(cd))};
-    pocketfft::shape_t axes{0};
+    stride.assign(1, static_cast<ptrdiff_t>(sizeof(cd)));
+    axes.assign(1, 0);
     const double fct = invert ? 1.0 / static_cast<double>(n) : 1.0;
     pocketfft::c2c<double>(shape, stride, stride, axes, !invert,
                           reinterpret_cast<const std::complex<double>*>(a.data()),
@@ -46,8 +51,14 @@ std::vector<cd> fftPadded(const cd* x, std::size_t len, std::size_t n,
 }
 
 double db10(double v) {
-    if (v < 1e-30) v = 1e-30;
-    return 10.0 * std::log10(v);
+    // Haertung: NaN/0/negativ -> -300 dB; Extremwerte (inf durch riesige
+    // Amplituden) werden auf +300 dB begrenzt, damit keine inf/NaN in die
+    // PSD-Werte und Schwellen eindringen.
+    if (!(v > 1e-30)) return -300.0;
+    double r = 10.0 * std::log10(v);
+    if (r > 300.0) r = 300.0;
+    if (r < -300.0) r = -300.0;
+    return r;
 }
 
 double median(std::vector<double>& v) {

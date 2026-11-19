@@ -26,6 +26,12 @@ public:
     std::vector<std::pair<std::size_t, std::size_t>> detect(
         const std::complex<double>* x, std::size_t n) const;
 
+    // Rauschboden des Puffers (pro Sample, Minimum-Statistik ueber
+    // Blockgruppen-Mediane; 0 wenn keiner bestimmbar). Wird z. B. als
+    // Referenz fuer das Energie-Gate der Banddetektion genutzt.
+    static double noiseFloor(const std::complex<double>* x, std::size_t n,
+                             const ClassifierConfig& cfg);
+
 private:
     const ClassifierConfig& cfg_;
 };

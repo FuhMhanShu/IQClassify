@@ -8,9 +8,10 @@
 
 namespace iqclassify {
 
-std::vector<std::pair<std::size_t, std::size_t>> PulseSegmenter::detect(
-    const std::complex<double>* x, std::size_t n) const {
-    const ClassifierConfig& cfg = cfg_;
+double PulseSegmenter::noiseFloor(const std::complex<double>* x,
+                                  std::size_t n,
+                                  const ClassifierConfig& cfg) {
+    if (x == nullptr || n == 0) return 0.0;
     const std::size_t w = cfg.segWin;
     const std::size_t nb = n / w < 1 ? 1 : n / w;
     std::vector<double> energy(nb, 0.0);
@@ -43,8 +44,28 @@ std::vector<std::pair<std::size_t, std::size_t>> PulseSegmenter::detect(
             haveFloor = true;
         }
     }
+    if (!haveFloor) return 0.0;
+    return floor < 1e-30 ? 1e-30 : floor;
+}
+
+std::vector<std::pair<std::size_t, std::size_t>> PulseSegmenter::detect(
+    const std::complex<double>* x, std::size_t n) const {
+    const ClassifierConfig& cfg = cfg_;
+    const std::size_t w = cfg.segWin;
+    const std::size_t nb = n / w < 1 ? 1 : n / w;
+    std::vector<double> energy(nb, 0.0);
+    for (std::size_t i = 0; i < nb; ++i) {
+        double s = 0.0;
+        const std::size_t lo = i * w;
+        const std::size_t hi = std::min(n, lo + w);
+        for (std::size_t k = lo; k < hi; ++k) {
+            s += x[k].real() * x[k].real() + x[k].imag() * x[k].imag();
+        }
+        energy[i] = s / static_cast<double>(w);
+    }
+    double floor = noiseFloor(x, n, cfg);
     std::vector<std::pair<std::size_t, std::size_t>> segs;
-    if (!haveFloor) return segs;
+    if (floor <= 0.0) return segs;
     if (floor < 1e-30) floor = 1e-30;
     const double onThr = std::pow(10.0, cfg.segOnDb / 10.0);
     const double offThr = std::pow(10.0, cfg.segOffDb / 10.0);

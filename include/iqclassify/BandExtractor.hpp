@@ -46,8 +46,11 @@ public:
         std::vector<double> psdDb;  // Laenge nft, in dB
     };
 
+    // floorRef: Rauschboden des Puffers pro Sample (z. B. PulseSegmenter::
+    // noiseFloor) als Referenz fuer das Energie-Gate; < 0 deaktiviert das
+    // Gate (alle Fenster werden gerechnet).
     BandDetection bands(const std::complex<double>* x, std::size_t a,
-                        std::size_t b) const;
+                        std::size_t b, double floorRef = -1.0) const;
 
     struct Slice {
         std::vector<std::complex<double>> y;  // Basisband-Slice des Segments

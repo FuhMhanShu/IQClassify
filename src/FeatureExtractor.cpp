@@ -32,9 +32,19 @@ Features extractFeatures(const std::vector<std::complex<double>>& y,
     double envSum = 0.0;
     {   // Hoellkurve
         double acc = 0.0;
+        double emax = 0.0;
         for (std::size_t i = 0; i < n; ++i) {
             f.env[i] = std::abs(y[i]);
             acc += f.env[i];
+            if (f.env[i] > emax) emax = f.env[i];
+        }
+        // Haertung: Extremamplituden normalisieren (sonst wuerde env^2 in
+        // den Statistiken ueberlaufen -> inf/NaN). Alle Nutzer von f.env
+        // sind skaleninvariant (CV/PAPR als Verhältnisse, Chirp-Fit und
+        // Symbolratensuche mittelwertfrei, Gates relativ zum Median).
+        if (emax > 1e100) {
+            for (double& v : f.env) v /= emax;
+            acc /= emax;
         }
         me = n ? acc / static_cast<double>(n) : 0.0;
         envSum = acc;

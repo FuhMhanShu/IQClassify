@@ -30,6 +30,9 @@
 //      Legacy-Pfad, Resampling in classify, breiter Chirp bleibt ein Puls
 //  17. Skalierung/Performance: 2 Mio Samples in einem Durchlauf klassifizieren
 //      (Laufzeit wird ausgegeben, nur gegen Pathologien abgesichert)
+//  18. Haertung II: Extremamplituden (1e150/1e-300), Nyquist-Muster, Puls am
+//      Pufferanfang/-ende, 60 dB SNR, Mini-Puffer (n=1..70), Puffer vollstaendig
+//      vom Puls ausgefuellt (dokumentierte Segmenter-Grenze: 0 Pulse)
 //
 // Ein Szenario besteht genau dann den Test, wenn die sortierte Labelmenge
 // der erkannten Pulse der erwarteten entspricht. Fuer
@@ -1388,6 +1391,112 @@ int main() {
             std::printf("[FAIL] %-24s got=%s n=%zu ms=%.0f\n", "scale-2M",
                         got.c_str(), res.size(), ms);
             for (const auto& r : res) printPulse(r);
+        }
+    }
+    // 18. Haertung II: Extremfaelle mit definiertem Ergebnis.
+    {
+        auto check = [](const char* name, const std::vector<iqtest::cd>& buf,
+                        const std::string& expect, std::size_t maxFine0 = 0) {
+            ++g_total;
+            iqclassify::ClassifierConfig cfg;
+            iqclassify::ModulationClassifier clf(cfg);
+            const auto res = clf.classify(buf.data(), buf.size());
+            std::vector<std::string> l;
+            for (const auto& r : res)
+                l.push_back(iqclassify::toString(r.modulation));
+            const std::string got = joinLabels(l);
+            bool ok = got == expect;
+            if (ok && maxFine0 > 0 && !res.empty())
+                ok = res[0].startSampleFine < maxFine0;
+            if (ok) {
+                ++g_ok;
+                std::printf("[OK ] %-24s n=%zu -> %s\n", name, buf.size(),
+                            got.empty() ? "(leer)" : got.c_str());
+            } else {
+                std::printf("[FAIL] %-24s expect=%s got=%s n=%zu\\n", name,
+                            expect.c_str(), got.c_str(), res.size());
+            }
+        };
+        {   // Extremamplitude 1e150: skaliert korrekt (QPSK), kein inf/NaN.
+            std::mt19937 rng(1);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            auto p = iqtest::genPsk(rng, 4, 400, 8);
+            for (auto& v : p) v *= 1e150;
+            rec.add(p, 0.12, 20.0);
+            rec.silence(2000);
+            check("hard-amp-1e150", rec.buffer(), "QPSK");
+        }
+        {   // Extrem kleine Amplitude 1e-300: im Rauschen unsichtbar -> leer.
+            std::mt19937 rng(2);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            auto p = iqtest::genPsk(rng, 4, 400, 8);
+            for (auto& v : p) v *= 1e-300;
+            rec.add(p, 0.12, 20.0);
+            rec.silence(2000);
+            check("hard-amp-1e-300", rec.buffer(), "");
+        }
+        {   // Nyquist-Muster (+-1 alternierend): definiert, keine Pulse.
+            std::vector<iqtest::cd> b(8000);
+            for (std::size_t i = 0; i < b.size(); ++i)
+                b[i] = iqtest::cd(i % 2 ? 1.0 : -1.0, 0.0);
+            check("hard-nyquist-alt", b, "");
+        }
+        {   // Puls beginnt bei Sample 0.
+            std::mt19937 rng(3);
+            iqtest::Recorder rec;
+            rec.silence(500);
+            rec.add(iqtest::genPsk(rng, 4, 400, 8), 0.12, 20.0, 0);
+            rec.silence(2000);
+            check("hard-pulse-at-0", rec.buffer(), "QPSK", 200);
+        }
+        {   // Puls endet exakt am Pufferende.
+            std::mt19937 rng(4);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genCw(rng, 3000), -0.20, 20.0, rec.buffer().size());
+            check("hard-pulse-at-end", rec.buffer(), "Unmodulated");
+        }
+        {   // Sehr hohes SNR (60 dB).
+            std::mt19937 rng(5);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genPsk(rng, 4, 400, 8), 0.12, 60.0);
+            rec.silence(2000);
+            check("hard-snr-60dB", rec.buffer(), "QPSK");
+        }
+        {   // Mini-Puffer n = 1..70 (Rauschen): definiert leer, kein Absturz.
+            ++g_total;
+            bool ok = true;
+            for (std::size_t n : {1u, 2u, 3u, 15u, 16u, 17u, 63u, 64u, 65u, 70u}) {
+                std::mt19937 rng(6);
+                std::normal_distribution<double> g(0.0, 0.008);
+                std::vector<iqtest::cd> b(n);
+                for (auto& v : b) v = iqtest::cd(g(rng), g(rng));
+                iqclassify::ClassifierConfig cfg;
+                iqclassify::ModulationClassifier clf(cfg);
+                if (!clf.classify(b.data(), b.size()).empty()) ok = false;
+            }
+            if (ok) {
+                ++g_ok;
+                std::printf("[OK ] %-24s n=1..70 Rauschen -> leer\\n",
+                            "hard-mini-sweep");
+            } else {
+                std::printf("[FAIL] %-24s Mini-Puffer lieferte Pulse\\n",
+                            "hard-mini-sweep");
+            }
+        }
+        {   // Puffer vollstaendig vom Puls ausgefuellt (keine stille Referenz):
+            // dokumentierte Segmenter-Grenze -> definiert 0 Pulse.
+            std::mt19937 rng(7);
+            auto p = iqtest::genPsk(rng, 4, 400, 8);
+            std::vector<iqtest::cd> b(p.size());
+            std::mt19937 r2(8);
+            std::normal_distribution<double> g(0.0, 0.01);
+            for (std::size_t i = 0; i < b.size(); ++i)
+                b[i] = p[i] + iqtest::cd(g(r2), g(r2));
+            check("hard-full-buffer", b, "");
         }
     }
     std::printf("\nscore: %d/%d\n", g_ok, g_total);

@@ -253,7 +253,7 @@ ist dort mit seiner Bedeutung kommentiert. Eine Änderung erfordert eine
 Die Referenzimplementierung führt die C++-Pipeline elementweise aus
 (äquivalente Arithmetik) und wurde gegen eine erweiterte Qualitätsmatrix
 aus 168 Szenarien gefahren. Die C++-Testsuite (tests/test_main.cpp,
-126 Szenarien) deckt den verifizierten robusten Bereich ab; jedes Szenario
+134 Szenarien) deckt den verifizierten robusten Bereich ab; jedes Szenario
 der Suite wurde in der Referenz über mindestens drei Seeds bestätigt.
 
 - Basiskalibrierung, SNR 20 dB, sps 8: 9/9 korrekt (BPSK, QPSK, FSK2,
@@ -320,6 +320,23 @@ Eingabesicherung (defense in depth, mehrschichtig):
   (Modulo-Division durch null).
 - estimateSnrFlat: leere PSD oder degenerierte Bandbreite liefern
   SNR -99 dB, Flachheit 0.
+- Extremamplituden: PSD-Leistung wird auf 1e300 begrenzt, `db10` auf
+  [-300, +300] dB (NaN/0 -> -300 dB); Detektionsfenster und Extraktionspuffer
+  werden vor der FFT normalisiert (FFT ist linear, die Extraktion skaliert
+  nach der IFFT zurück), Hüllkurve und Crop in den Folgestufen ebenso —
+  die Klassifikation ist skaleninvariant. Ein Puls mit Amplitude 1e150 wird
+  korrekt klassifiziert (Abschnitt 18), 1e-300 ist im Rauschen unsichtbar.
+- Weitere Randfälle (Abschnitt 18): Nyquist-Muster, Puls am Pufferanfang
+  (Sample 0) und am Pufferende, 60 dB SNR, Mini-Puffer n = 1..70, Puffer
+  vollständig vom Puls ausgefüllt (Segmenter braucht eine stille Referenz —
+  dokumentierte Grenze: 0 Pulse).
+
+## Performance-Optimierung
+
+- Energie-Gate der Detektion (stille Fenster ohne FFT), schnelle zyklische
+  Kohärenz per Drehrekremenz, kein Allokieren pro FFT-Aufruf, SNR ohne
+  std::set. Messung und Vorher/Nachher-Vergleich: docs/PERFORMANCE.md
+  (~1,3x schneller bei dichten Puffern, ~2x bei spärlichen 2M-Sample-Puffern).
 
 ## Grenzen
 

@@ -3,6 +3,8 @@
 
 #include "iqclassify/Channelizer.hpp"
 
+#include "iqclassify/PulseSegmenter.hpp"
+
 #include <algorithm>
 #include <cmath>
 
@@ -63,8 +65,10 @@ std::vector<Channelizer::Channel> Channelizer::channelize(
     if (iq == nullptr || n == 0) return out;
     BandExtractor bxs(cfg_);
     // Spektrale Detektion auf dem ganzen Puffer: die Kanaele legen sich um
-    // die Bereiche, in denen Energie detektiert wurde.
-    const BandExtractor::BandDetection det = bxs.bands(iq, 0, n);
+    // die Bereiche, in denen Energie detektiert wurde (Energie-Gate gegen
+    // den globalen Rauschboden des Puffers).
+    const BandExtractor::BandDetection det = bxs.bands(
+        iq, 0, n, PulseSegmenter::noiseFloor(iq, n, cfg_));
     const std::vector<Band> ebs = energyBands(det);
     out.reserve(ebs.size());
     for (const Band& cb : ebs)

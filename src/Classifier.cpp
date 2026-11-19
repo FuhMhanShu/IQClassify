@@ -289,13 +289,20 @@ std::pair<double, double> rsFromCyclic(const std::vector<double>& env2,
     // geleakten Dirichlet-Nebenzipfels ist um bis zu einen Bin
     // vorgeneigt; ein Symbolratenfehler von 1e-4/Sample driftet ueber
     // einige tausend Symbole um ein volles Sample.
+    // Schnelle zyklische Kohaerenz: Drehung als inkrementelle Rekurrenz
+    // (4 Mults pro Sample statt sin/cos — bei der Sub-Bin-Suche der
+    // dominierende Kostenblock). Rotation m <- m * e^{-j*2pi*f}.
     auto coh = [&](double f) {
         cd acc(0.0, 0.0);
-        double ph = 0.0;
-        const double stp = 2.0 * kPi * f;
+        const double cs = std::cos(2.0 * kPi * f);
+        const double sn = -std::sin(2.0 * kPi * f);
+        double cr = 1.0;
+        double ci = 0.0;
         for (const cd& v : tsig) {
-            ph += stp;
-            acc += v * cd(std::cos(ph), -std::sin(ph));
+            acc += v * cd(cr, ci);
+            const double nr = cr * cs - ci * sn;
+            ci = cr * sn + ci * cs;
+            cr = nr;
         }
         return std::abs(acc);
     };
@@ -809,13 +816,18 @@ std::pair<double, double> rsLineFull(const std::vector<double>& v) {
         if (std::abs(delta) > 1.0) delta = 0.0;
     }
     double fr = (static_cast<double>(bestK) + delta) / static_cast<double>(nft);
+    // Schnelle zyklische Kohaerenz via inkrementeller Drehung (s. o.).
     auto coh = [&](double f) {
         cd acc(0.0, 0.0);
-        double ph = 0.0;
-        const double stp = 2.0 * kPi * f;
+        const double cs = std::cos(2.0 * kPi * f);
+        const double sn = -std::sin(2.0 * kPi * f);
+        double cr = 1.0;
+        double ci = 0.0;
         for (const cd& vv : tsig) {
-            ph += stp;
-            acc += vv * cd(std::cos(ph), -std::sin(ph));
+            acc += vv * cd(cr, ci);
+            const double nr = cr * cs - ci * sn;
+            ci = cr * sn + ci * cs;
+            cr = nr;
         }
         return std::abs(acc);
     };
@@ -860,7 +872,7 @@ std::vector<PulseResult> ModulationClassifier::classifyChannelized(
     // Erster Pipelineschritt: spektrale Kanalisierung auf dem ganzen Puffer.
     // Die Kanaele sind die detektierten Energiebereiche des Spektrums (nicht
     // gleichverteilt, sondern um die Stellen mit Energie gelegt).
-    const BandExtractor::BandDetection det0 = bxs.bands(iq, 0, n);
+    const BandExtractor::BandDetection det0 = bxs.bands(iq, 0, n, PulseSegmenter::noiseFloor(iq, n, cfg));
     std::vector<Band> chans = det0.bands;
     if (chans.empty())
         chans.push_back(Band{0, static_cast<long>(det0.nft)});
@@ -868,6 +880,8 @@ std::vector<PulseResult> ModulationClassifier::classifyChannelized(
     const PulseSegmenter seg(cfg);
     const std::vector<std::pair<std::size_t, std::size_t>> segs =
         seg.detect(iq, n);
+    // globaler Rauschboden als Gate-Referenz fuer die Detektion
+    const double nf = PulseSegmenter::noiseFloor(iq, n, cfg);
     // Pro Segment: Detektion (mit korrektem Rauschboden des Originals) und
     // Zuordnung jedes Segment-Bandes zum ueberlappenden Kanal.
     struct SegDet {
@@ -881,7 +895,7 @@ std::vector<PulseResult> ModulationClassifier::classifyChannelized(
     for (std::size_t i = 0; i < segs.size(); ++i) {
         sd[i].a = segs[i].first;
         sd[i].b = segs[i].second;
-        sd[i].det = bxs.bands(iq, sd[i].a, sd[i].b);
+        sd[i].det = bxs.bands(iq, sd[i].a, sd[i].b, nf);
         sd[i].bands = sd[i].det.bands;
         if (sd[i].bands.empty())
             sd[i].bands.push_back(
@@ -965,10 +979,20 @@ void ModulationClassifier::processSlice(
         // NaN/Inf duerfen weder Statistiken vergiften noch in
         // Indexumrechnungen einfliessen; ein Dropout verhaelt
         // sich damit wie Stille. (Konsistent mit dem Oracle.)
+        double amax = 0.0;
         for (cd& v : ys) {
-            if (!std::isfinite(v.real()) || !std::isfinite(v.imag()))
+            if (!std::isfinite(v.real()) || !std::isfinite(v.imag())) {
                 v = cd(0.0, 0.0);
+            } else {
+                const double a = std::abs(v);
+                if (a > amax) amax = a;
+            }
         }
+        // Haertung: Extremamplituden normalisieren (Klassifikation ist
+        // skaleninvariant; sonst wuerden Betragsquadrate/-potenzen in den
+        // Statistiken ueberlaufen).
+        if (amax > 1e100)
+            for (cd& v : ys) v /= amax;
         const Features f =
             extractFeatures(ys, 0.0, bwLocal, bandBins, snrDb, flatDb, cfg);
         CoarseClass coarse = CoarseClass::Unknown;
@@ -1049,10 +1073,11 @@ std::vector<PulseResult> ModulationClassifier::classifyLegacy(
     if (iq == nullptr || n == 0) return results;
     const PulseSegmenter seg(cfg);
     const BandExtractor bxs(cfg);
+    const double nf = PulseSegmenter::noiseFloor(iq, n, cfg);
     for (const auto& ab : seg.detect(iq, n)) {
         const std::size_t a = ab.first;
         const std::size_t b = ab.second;
-        BandExtractor::BandDetection det = bxs.bands(iq, a, b);
+        BandExtractor::BandDetection det = bxs.bands(iq, a, b, nf);
         std::vector<Band> bands = det.bands;
         if (bands.empty()) {
             bands.push_back(Band{0, static_cast<long>(det.nft)});
@@ -1151,6 +1176,12 @@ PskSync ModulationClassifier::synchronizePsk(const std::complex<double>* iq,
     std::vector<cd> y = extractPulse(iq, n, pulse);
     sanitizeSlice(y);
     if (y.size() < 256) return r;
+    {   // Haertung: Extremamplituden normalisieren (skaleninvariant).
+        double amax = 0.0;
+        for (const cd& v : y) amax = std::max(amax, std::abs(v));
+        if (amax > 1e100)
+            for (cd& v : y) v /= amax;
+    }
     const Features f =
         extractFeatures(y, pulse.centerFreqRefined, pulse.bandwidthNorm,
                         pulse.bandBins, pulse.snrDb, pulse.spectralFlatnessDb,
@@ -1257,6 +1288,12 @@ ChirpParams ModulationClassifier::analyzeChirp(
     std::vector<cd> y = extractPulse(iq, n, pulse);
     sanitizeSlice(y);
     if (y.size() < 256) return r;
+    {   // Haertung: Extremamplituden normalisieren (skaleninvariant).
+        double amax = 0.0;
+        for (const cd& v : y) amax = std::max(amax, std::abs(v));
+        if (amax > 1e100)
+            for (cd& v : y) v /= amax;
+    }
     const Features f =
         extractFeatures(y, pulse.centerFreqRefined, pulse.bandwidthNorm,
                         pulse.bandBins, pulse.snrDb, pulse.spectralFlatnessDb,

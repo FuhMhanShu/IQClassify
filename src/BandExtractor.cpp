@@ -4,14 +4,13 @@
 
 #include <algorithm>
 #include <cmath>
-#include <set>
 #include <vector>
 
 namespace iqclassify {
 
 BandExtractor::BandDetection BandExtractor::bands(const std::complex<double>* x,
-                                                  std::size_t a,
-                                                  std::size_t b) const {
+                                                  std::size_t a, std::size_t b,
+                                                  double floorRef) const {
     const ClassifierConfig& cfg = cfg_;
     BandDetection det;
     const std::size_t L = b - a;
@@ -31,12 +30,25 @@ BandExtractor::BandDetection BandExtractor::bands(const std::complex<double>* x,
         win[i] = 0.5 - 0.5 * std::cos(2.0 * 3.14159265358979323846 *
                                       static_cast<double>(i) /
                                       static_cast<double>(wlen));
-    // per-Bin-Maximum ueber alle Hann-Teilfenster (50 % Ueberlappung)
+    // Energie-Gate (Performance): Fenster, deren Energie klar unter dem
+    // Rauschboden des Puffers liegt, tragen zum Max-Hold nichts bei (aktive
+    // Fenster liefern den Rauschboden ohnehin) und werden uebersprungen.
+    // Referenz ist der globale Puffer-Boden (floorRef, z. B. vom Segmenter),
+    // nicht der des Segments — ein Segment kann vollstaendig vom Puls
+    // ausgefuellt sein. Gate-Faktor 1.5: selbst ein 0-dB-Puls (Gesamtleistung
+    // Signal = Rauschen) bleibt liegen, reine Rauschfenster nicht.
+    const double gate =
+        floorRef > 0.0 ? floorRef * static_cast<double>(wlen) * 1.5 : -1.0;
+    // per-Bin-Maximum ueber alle Hann-Teilfenster (50 % Ueberlappung);
+    // buf wird wiederverwendet (kein Neu-Allokieren pro Fenster).
     std::vector<double> psd(nft, 0.0);
+    std::vector<detail::cd> buf(nft);
     const std::size_t lastStart = L >= wlen ? L - wlen + 1 : 1;
     for (std::size_t s = 0; s < lastStart; s += (hop ? hop : 1)) {
-        std::vector<detail::cd> buf(nft, detail::cd(0.0, 0.0));
+        std::fill(buf.begin(), buf.end(), detail::cd(0.0, 0.0));
         const std::size_t lim = std::min(wlen, L - s);
+        double ewin = 0.0;
+        double wmax = 0.0;
         for (std::size_t t = 0; t < lim; ++t) {
             const detail::cd v = x[a + s + t];
             // Haertung: NaN/Inf vergiften via FFT das ganze Fenster,
@@ -45,12 +57,24 @@ BandExtractor::BandDetection BandExtractor::bands(const std::complex<double>* x,
                 buf[t] = detail::cd(0.0, 0.0);
             } else {
                 buf[t] = v * win[t];
+                ewin += v.real() * v.real() + v.imag() * v.imag();
+                const double av = std::abs(v);
+                if (av > wmax) wmax = av;
             }
         }
+        if (gate >= 0.0 && ewin < gate) continue;  // stilles Fenster
+        // Haertung: Extremamplituden vor der FFT normalisieren (PSD ist
+        // skaleninvariant; sonst wuerde |X|^2 ueberlaufen).
+        if (wmax > 1e100)
+            for (std::size_t t = 0; t < lim; ++t) buf[t] /= wmax;
         detail::fftInPlace(buf, false);
         for (std::size_t k = 0; k < nft; ++k) {
-            const double v = buf[k].real() * buf[k].real() +
-                             buf[k].imag() * buf[k].imag();
+            const double r = buf[k].real();
+            const double im = buf[k].imag();
+            // Haertung: Leistung auf 1e300 begrenzen (sonst inf bei
+            // Extremamplituden; db10 begrenzt anschliessend auf +300 dB).
+            double v = r * r + im * im;
+            if (!(v < 1e300)) v = 1e300;
             if (v > psd[k]) psd[k] = v;
         }
     }
@@ -238,12 +262,23 @@ BandExtractor::Slice BandExtractor::extract(const std::complex<double>* x,
     std::vector<detail::cd> buf(L);
     // Haertung: nicht-endliche Samples als Ausfall (Null) behandeln,
     // sonst vergiften sie das komplette Spektrum des Puffers.
+    double amax = 0.0;
     for (std::size_t i = 0; i < L; ++i) {
         const std::complex<double> v = x[a + i];
-        buf[i] = std::isfinite(v.real()) && std::isfinite(v.imag())
-                     ? detail::cd(v.real(), v.imag())
-                     : detail::cd(0.0, 0.0);
+        if (std::isfinite(v.real()) && std::isfinite(v.imag())) {
+            buf[i] = detail::cd(v.real(), v.imag());
+            const double av = std::abs(v);
+            if (av > amax) amax = av;
+        } else {
+            buf[i] = detail::cd(0.0, 0.0);
+        }
     }
+    // Haertung: Extremamplituden vor der FFT normalisieren (FFT ist linear;
+    // sonst wuerden Betragsquadrate stromabwaerts ueberlaufen). Nach der IFFT
+    // wird zurueckskaliert, damit Slice.y die Originalamplitude behaelt.
+    const double xscale = amax > 1e100 ? amax : 1.0;
+    if (xscale != 1.0)
+        for (std::size_t i = 0; i < L; ++i) buf[i] /= xscale;
     buf.resize(padded, detail::cd(0.0, 0.0));
     detail::fftInPlace(buf, false);
     // Maske mit Waechter: die vollstaendige Uebergangszone des Pulses
@@ -277,7 +312,7 @@ BandExtractor::Slice BandExtractor::extract(const std::complex<double>* x,
         const double cs = std::cos(ang);
         const double sn = std::sin(ang);
         const std::complex<double> rot(cs, sn);
-        out.y[i] = masked[i] * rot;
+        out.y[i] = masked[i] * rot * xscale;
     }
     return out;
 }
@@ -309,19 +344,20 @@ void estimateSnrFlat(const std::vector<double>& psdDb, const Band& band,
         inb.push_back(psdDb[static_cast<std::size_t>(((k % nftL) + nftL) % nftL)]);
     // Aussenreferenz ohne die Bloecke fremder Bander (+- Breite dieses
     // Bandes als Waechter); sonst kollabiert die SNR-Schaetzung im
-    // Mehrpuls-Fall.
-    std::set<long> excl;
+    // Mehrpuls-Fall. Markierung als Byte-Feld statt std::set: O(nft) statt
+    // O(Baender * Breite * log) pro Aufruf.
+    std::vector<char> excl(static_cast<std::size_t>(nftL), 0);
     for (const Band& ob : allBands) {
         if (ob.lo == band.lo && ob.hi == band.hi) continue;
         for (long k = ob.lo - width; k < ob.hi + width; ++k)
-            excl.insert(((k % nftL) + nftL) % nftL);
+            excl[static_cast<std::size_t>(((k % nftL) + nftL) % nftL)] = 1;
     }
     std::vector<double> outb;
     outb.reserve(psdDb.size());
     for (long k = 0; k < nftL; ++k) {
         const long rel = ((k - lo) % nftL + nftL) % nftL;
         if (rel < width) continue;
-        if (!excl.empty() && excl.count(k) > 0) continue;
+        if (excl[static_cast<std::size_t>(k)]) continue;
         outb.push_back(psdDb[static_cast<std::size_t>(k)]);
     }
     if (outb.empty()) {
