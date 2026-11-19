@@ -21,6 +21,10 @@ struct ClassifierConfig {
                               // (Zeitsegmentierung, Crops, Merkmale, Stufe 1/2).
                               // false = Legacy-Pfad (erst Zeitsegmentierung, dann
                               // Banddetektion je Segment)
+    int threads = 0;          // Parallelverarbeitung der Kanaele/Segmente:
+                              // 0 = automatisch (min(hardware_concurrency, 8)),
+                              // 1 = seriell. Wirkt ab ~32k Samples Pufferlaenge;
+                              // Ergebnisse sind threadzahl-unabhaengig identisch
     int channelDecimate = 1;  // Resample-Faktor je Kanal (1 = volle Abtastrate);
                               // wird pro Kanal auf <= floor(1/Kanalbreite)
                               // begrenzt; sample-basierte Schwellwerte der

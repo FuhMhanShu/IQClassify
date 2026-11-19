@@ -88,6 +88,15 @@ double medianOf(const std::vector<double>& v) {
 
 std::size_t protoPad(std::size_t n) { return pow2ceil(2 * n); }
 
+unsigned effectiveThreads(int requested) {
+    unsigned hw = std::thread::hardware_concurrency();
+    if (hw == 0) hw = 1;
+    if (hw > 8) hw = 8;
+    if (requested <= 0) return hw;  // automatisch
+    unsigned r = static_cast<unsigned>(requested);
+    return r < hw ? r : hw;
+}
+
 std::vector<double> unwrapPhase(const std::vector<cd>& y) {
     const std::size_t n = y.size();
     std::vector<double> up(n, 0.0);

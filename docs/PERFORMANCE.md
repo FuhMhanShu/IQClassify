@@ -54,6 +54,25 @@ Spärliche Puffer profitieren stärker vom Energie-Gate der Detektion:
 - Resampling (`channelDecimate > 1`) reduziert die Rate pro Kanal und damit
   die Kosten der Folgestufen entsprechend.
 
+## Parallelverarbeitung der Kanäle (threads)
+
+Die Kanalverarbeitung ist parallelisiert (`ClassifierConfig::threads`,
+Default 0 = automatisch min(hardware_concurrency, 8), 1 = seriell, wirkt ab
+~32k Samples Pufferlänge): Segment-Detektion und Extraktion/Klassifikation
+laufen pro (Segment, Kanalband) auf eigenen Threads, `Channelizer::channelize`
+pro Kanal. pocketfft-Plancache und `fftInPlace` sind thread-sicher.
+Die Ergebnisse sind **identisch unabhängig von der Threadanzahl**
+(pro Thread eigene Buckets, danach deterministisch sortiert; Test Abschnitt 19).
+
+Messung (5 Kerne, Median, 2M Samples / 250 Pulse):
+
+| Modus | 100k | 500k | 1M | 2M (250 Pulse) | MS/s bei 2M |
+|-------|-----:|-----:|---:|---------------:|------------:|
+| threads=1 (seriell) | 19,3 ms | 101 ms | 199 ms | **393 ms** | 5,1 |
+| threads=auto (5) | 8,7 ms | 39 ms | 76 ms | **~150 ms** | ~13 |
+
+→ **~2,5-3× Speedup** durch die Parallelverarbeitung bei 2M Samples.
+
 ## Skalierungs-Test
 
 Die Testsuite enthält Abschnitt 17 (`scale-2M`): 2 000 000 Samples mit 3

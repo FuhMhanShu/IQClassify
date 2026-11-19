@@ -205,7 +205,8 @@ Schwerpunkt, so breit wie der Bereich inkl. Waechter).
 ## ClassifierConfig
 
 Alle Schwellwerte der Referenzvalidierung, gruppiert wie in
-docs/METHODOLOGY.md (Kanalisierung, Pulssegmentierung, Banddetektion, SNR/Stufe 1,
+docs/METHODOLOGY.md (Kanalisierung, Parallelverarbeitung (`threads`: 0 =
+automatisch, 1 = seriell), Pulssegmentierung, Banddetektion, SNR/Stufe 1,
 OFDM-Präfix, Symboltiming, Phasenanalyse, QAM-Ordnung). Jedes Feld ist
 in include/Config.hpp individuell kommentiert. Standardwerte entsprechen der
 validierten Kalibrierung; Änderungen erfordern eine erneute Validierung

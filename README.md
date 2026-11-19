@@ -40,7 +40,7 @@ klassifiziert die Modulationsart jedes Pulses in zwei Stufen:
   Symbol-Schnittstelle fuer PSK und FSK2 bereit.
 - Klassenkapselung: eine Fassade (`ModulationClassifier`), alle
   Schwellwerte konfigurierbar (`ClassifierConfig`).
-- Deterministische Testsuite ohne externes Testframework: 134 Szenarien
+- Deterministische Testsuite ohne externes Testframework: 136 Szenarien
   aus der Qualitaetsmatrix (SNR-Raster, Oversampling, Frequenzlagen,
   Chirp-Varianten, Pulslaengen, Mehrpuls, Seed-Streuung) plus
   Haertungsfaelle (Nullzeiger, leere und NaN-beladene Eingaben,
@@ -110,9 +110,10 @@ Benchmark-Tool (Puffer von 10k bis 2M Samples):
     cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
     ./build/iqclassify_benchmark
 
-Ergebnis: ~linear skalierend (~5 MSamples/s, 2M Samples mit 250 Pulsen in
-~0.4 s; spärliche 2M-Sample-Puffer ~100 MSamples/s), siehe
-docs/PERFORMANCE.md.
+Ergebnis: ~linear skalierend (~5 MSamples/s seriell, 2M Samples mit 250
+Pulsen in ~0.4 s; mit Parallelverarbeitung der Kanäle (`threads`, Default
+auto) ~13-15 MSamples/s, ~2,5-3x Speedup; spärliche 2M-Sample-Puffer
+~100 MSamples/s), siehe docs/PERFORMANCE.md.
 
 ## Bilder
 

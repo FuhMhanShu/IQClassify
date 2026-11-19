@@ -6,6 +6,9 @@
 // Referenzimplementierung; siehe docs/METHODOLOGY.md.
 
 #include "iqclassify/Classifier.hpp"
+
+#include <atomic>
+#include <thread>
 #include "iqclassify/PulseSegmenter.hpp"
 
 #include <algorithm>
@@ -891,46 +894,70 @@ std::vector<PulseResult> ModulationClassifier::classifyChannelized(
         std::vector<Band> bands;
         std::vector<std::size_t> owner;
     };
+    // Ab dieser Pufferlaenge lohnt sich die Parallelverarbeitung der
+    // Segmente/Kanaele (darunter dominiert der Thread-Start).
+    const unsigned thr =
+        n >= 32768 ? detail::effectiveThreads(cfg.threads) : 1u;
     std::vector<SegDet> sd(segs.size());
-    for (std::size_t i = 0; i < segs.size(); ++i) {
-        sd[i].a = segs[i].first;
-        sd[i].b = segs[i].second;
-        sd[i].det = bxs.bands(iq, sd[i].a, sd[i].b, nf);
-        sd[i].bands = sd[i].det.bands;
-        if (sd[i].bands.empty())
-            sd[i].bands.push_back(
-                Band{0, static_cast<long>(sd[i].det.nft)});
-        // Kanalraster (det0) ins Segmentraster (detS) abbilden.
-        const long sc = static_cast<long>(det0.nft) /
-                        static_cast<long>(sd[i].det.nft);
-        for (const Band& bS : sd[i].bands) {
-            std::size_t owner = 0;
-            long bestOv = -1;
-            for (std::size_t j = 0; j < chans.size(); ++j) {
-                const Band cj{chans[j].lo / sc, chans[j].hi / sc};
-                const long ov = std::min(bS.hi, cj.hi) -
-                                std::max(bS.lo, cj.lo);
-                if (ov > bestOv) {
-                    bestOv = ov;
-                    owner = j;
+    // Pro Segment: Detektion (mit korrektem Rauschboden des Originals) und
+    // Zuordnung jedes Segment-Bandes zum ueberlappenden Kanal. Segmente sind
+    // unabhaengig -> parallelisierbar.
+    detail::parallelFor(
+        segs.size(), thr,
+        [&](std::size_t i) {
+            sd[i].a = segs[i].first;
+            sd[i].b = segs[i].second;
+            sd[i].det = bxs.bands(iq, sd[i].a, sd[i].b, nf);
+            sd[i].bands = sd[i].det.bands;
+            if (sd[i].bands.empty())
+                sd[i].bands.push_back(
+                    Band{0, static_cast<long>(sd[i].det.nft)});
+            // Kanalraster (det0) ins Segmentraster (detS) abbilden.
+            const long sc = static_cast<long>(det0.nft) /
+                            static_cast<long>(sd[i].det.nft);
+            for (const Band& bS : sd[i].bands) {
+                std::size_t owner = 0;
+                long bestOv = -1;
+                for (std::size_t j = 0; j < chans.size(); ++j) {
+                    const Band cj{chans[j].lo / sc, chans[j].hi / sc};
+                    const long ov = std::min(bS.hi, cj.hi) -
+                                    std::max(bS.lo, cj.lo);
+                    if (ov > bestOv) {
+                        bestOv = ov;
+                        owner = j;
+                    }
                 }
+                sd[i].owner.push_back(owner);
             }
-            sd[i].owner.push_back(owner);
-        }
-    }
+        });
     // Folgestufen je Kanal: Baender des Kanals werden pro Zeitsegment
     // extrahiert (Bandpass), auf die Bandmitte gemischt und optional
     // resamplet (Dezimierung mit Anti-Alias-Filter); danach Crops,
-    // Merkmale und Stufe 1/2 auf dem Kanal-Basisband.
+    // Merkmale und Stufe 1/2 auf dem Kanal-Basisband. Jedes (Segment, Band)
+    // ist unabhaengig -> parallelisierbar; Ergebnisse landen pro Thread in
+    // eigenen Buckets und werden danach deterministisch sortiert.
     const std::size_t Dreq =
         cfg.channelDecimate < 1
             ? 1
             : static_cast<std::size_t>(cfg.channelDecimate);
-    for (std::size_t ci = 0; ci < chans.size(); ++ci) {
-        for (const SegDet& s : sd) {
-            for (std::size_t bi = 0; bi < s.bands.size(); ++bi) {
-                if (s.owner[bi] != ci) continue;
-                const Band& bS = s.bands[bi];
+    struct Work {
+        std::size_t seg;
+        std::size_t band;
+    };
+    std::vector<Work> items;
+    for (std::size_t si = 0; si < sd.size(); ++si)
+        for (std::size_t bi = 0; bi < sd[si].bands.size(); ++bi)
+            items.push_back(Work{si, bi});
+    std::vector<std::vector<PulseResult>> buckets(thr);
+    {
+        std::atomic<std::size_t> next{0};
+        const auto worker = [&](std::size_t tid) {
+            for (;;) {
+                const std::size_t k = next.fetch_add(1);
+                if (k >= items.size()) return;
+                const Work& w = items[k];
+                const SegDet& s = sd[w.seg];
+                const Band& bS = s.bands[w.band];
                 double snrDb = 0.0;
                 double flatDb = 0.0;
                 estimateSnrFlat(s.det.psdDb, bS, cfg, s.bands, &snrDb,
@@ -951,14 +978,28 @@ std::vector<PulseResult> ModulationClassifier::classifyChannelized(
                              slice.bw * static_cast<double>(D),
                              static_cast<std::size_t>(bS.width()), snrDb,
                              flatDb, s.det.psdDb, bS, s.det.nft, D,
-                             results);
+                             buckets[tid]);
             }
-        }
+        };
+        std::vector<std::thread> pool;
+        pool.reserve(thr > 0 ? thr - 1 : 0);
+        for (unsigned t = 1; t < thr; ++t)
+            pool.emplace_back(worker, t);
+        worker(0);
+        for (auto& th : pool) th.join();
     }
-    std::sort(results.begin(), results.end(),
-              [](const PulseResult& a, const PulseResult& b) {
-                  return a.startSampleFine < b.startSampleFine;
-              });
+    for (auto& b : buckets)
+        for (auto& r : b) results.push_back(std::move(r));
+    // Deterministische Reihenfolge unabhaengig von der Threadanzahl:
+    // feine Zeitlage, dann Frequenz, dann Laenge.
+    std::stable_sort(results.begin(), results.end(),
+                     [](const PulseResult& a, const PulseResult& b) {
+                         if (a.startSampleFine != b.startSampleFine)
+                             return a.startSampleFine < b.startSampleFine;
+                         if (a.centerFreqRefined != b.centerFreqRefined)
+                             return a.centerFreqRefined < b.centerFreqRefined;
+                         return a.numSamplesFine < b.numSamplesFine;
+                     });
     return results;
 }
 

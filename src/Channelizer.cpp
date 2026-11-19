@@ -70,9 +70,13 @@ std::vector<Channelizer::Channel> Channelizer::channelize(
     const BandExtractor::BandDetection det = bxs.bands(
         iq, 0, n, PulseSegmenter::noiseFloor(iq, n, cfg_));
     const std::vector<Band> ebs = energyBands(det);
-    out.reserve(ebs.size());
-    for (const Band& cb : ebs)
-        out.push_back(extract(iq, n, cb, det.nft, decimate));
+    out.resize(ebs.size());
+    // Kanaele sind unabhaengig -> Extraktion parallelisieren (ab ~32k Samples).
+    const unsigned thr =
+        n >= 32768 ? detail::effectiveThreads(cfg_.threads) : 1u;
+    detail::parallelFor(
+        ebs.size(), thr,
+        [&](std::size_t i) { out[i] = extract(iq, n, ebs[i], det.nft, decimate); });
     return out;
 }
 

@@ -33,6 +33,8 @@
 //  18. Haertung II: Extremamplituden (1e150/1e-300), Nyquist-Muster, Puls am
 //      Pufferanfang/-ende, 60 dB SNR, Mini-Puffer (n=1..70), Puffer vollstaendig
 //      vom Puls ausgefuellt (dokumentierte Segmenter-Grenze: 0 Pulse)
+//  19. Parallelverarbeitung: threads=1 vs. threads=4 liefern identische
+//      Ergebnisse (kanalisierte Pipeline + Channelizer)
 //
 // Ein Szenario besteht genau dann den Test, wenn die sortierte Labelmenge
 // der erkannten Pulse der erwarteten entspricht. Fuer
@@ -1497,6 +1499,69 @@ int main() {
             for (std::size_t i = 0; i < b.size(); ++i)
                 b[i] = p[i] + iqtest::cd(g(r2), g(r2));
             check("hard-full-buffer", b, "");
+        }
+    }
+    // 19. Parallelverarbeitung: identische Ergebnisse unabhaengig von der
+    //     Threadanzahl (kanalisierte Pipeline und Channelizer).
+    {
+        // Puffer >= 32k mit mehreren Pulsen (aktiviert die Parallelpfade).
+        std::mt19937 rng(99);
+        iqtest::Recorder rec;
+        rec.silence(60000);
+        rec.add(iqtest::genPsk(rng, 4, 400, 8), 0.15, 20.0, 5000);
+        rec.add(iqtest::genCw(rng, 3000), -0.20, 20.0, 20000);
+        rec.add(iqtest::genFsk2(rng, 400, 8), 0.05, 20.0, 35000);
+        rec.add(iqtest::genChirp(4000, 0.25, true), -0.05, 20.0, 50000);
+        rec.silence(20000);
+        const std::vector<iqtest::cd>& buf = rec.buffer();
+        ++g_total;
+        {
+            iqclassify::ClassifierConfig c1;
+            c1.threads = 1;
+            iqclassify::ClassifierConfig c4;
+            c4.threads = 4;
+            iqclassify::ModulationClassifier f1(c1);
+            iqclassify::ModulationClassifier f4(c4);
+            const auto r1 = f1.classify(buf.data(), buf.size());
+            const auto r4 = f4.classify(buf.data(), buf.size());
+            bool ok = r1.size() == r4.size() && r1.size() == 4;
+            for (std::size_t i = 0; ok && i < r1.size(); ++i) {
+                ok = r1[i].modulation == r4[i].modulation &&
+                     r1[i].startSampleFine == r4[i].startSampleFine &&
+                     r1[i].numSamplesFine == r4[i].numSamplesFine &&
+                     r1[i].centerFreqRefined == r4[i].centerFreqRefined;
+            }
+            if (ok) {
+                ++g_ok;
+                std::printf("[OK ] %-24s threads=1 == threads=4 (%zu Pulse)\n",
+                            "par-identical", r1.size());
+            } else {
+                std::printf("[FAIL] %-24s n1=%zu n4=%zu\n", "par-identical",
+                            r1.size(), r4.size());
+            }
+        }
+        ++g_total;
+        {
+            iqclassify::ClassifierConfig c1;
+            c1.threads = 1;
+            iqclassify::ClassifierConfig c4;
+            c4.threads = 4;
+            iqclassify::Channelizer z1(c1);
+            iqclassify::Channelizer z4(c4);
+            const auto a = z1.channelize(buf.data(), buf.size(), 1);
+            const auto b = z4.channelize(buf.data(), buf.size(), 1);
+            bool ok = a.size() == b.size() && a.size() >= 1;
+            for (std::size_t i = 0; ok && i < a.size(); ++i)
+                ok = a[i].centerNorm == b[i].centerNorm &&
+                     a[i].y.size() == b[i].y.size();
+            if (ok) {
+                ++g_ok;
+                std::printf("[OK ] %-24s channelize seriell == parallel (%zu Kanaele)\n",
+                            "par-channelize", a.size());
+            } else {
+                std::printf("[FAIL] %-24s n1=%zu n4=%zu\n", "par-channelize",
+                            a.size(), b.size());
+            }
         }
     }
     std::printf("\nscore: %d/%d\n", g_ok, g_total);

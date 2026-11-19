@@ -115,11 +115,11 @@ int main() {
                                  500000, 1000000, 2000000};
     std::printf("IQClassify Benchmark (fs = 1 normiert, 20 dB SNR, 3 Pulse bzw. "
                 "n/8000 Pulse)\n");
-    std::printf("%9s %7s | %12s %12s %12s | %6s %8s | %s\n", "samples",
-                "pulse", "classify ms", "legacy ms", "kanal. ms", "found",
+    std::printf("%9s %7s | %12s %12s %12s %12s | %6s %8s | %s\n", "samples",
+                "pulse", "auto ms", "1thr ms", "legacy ms", "kanal. ms", "found",
                 "MS/s", "labels");
-    std::printf("%9s %7s +%12s+%12s+%12s+%6s+%8s+%s\n", "-------", "-----",
-                "-----------", "---------", "---------", "-----", "-----",
+    std::printf("%9s %7s +%12s+%12s+%12s+%12s+%6s+%8s+%s\n", "-------", "-----",
+                "-----------", "---------", "---------", "---------", "-----", "-----",
                 "------");
     for (std::size_t n : sizes) {
         const int npulse = n < 100000 ? 3
@@ -127,10 +127,14 @@ int main() {
                                            3, n / 8000));
         auto buf = makeBuffer(n, npulse, 20240607u);
         const int reps = n <= 100000 ? 5 : (n <= 500000 ? 3 : 1);
-        iqclassify::ClassifierConfig cfg;  // Default: channelize = true
+        iqclassify::ClassifierConfig cfg;  // Default: channelize = true, threads = auto
+        iqclassify::ClassifierConfig cfg1;
+        cfg1.threads = 1;  // seriell
         iqclassify::ClassifierConfig cfgL;
         cfgL.channelize = false;
+        cfgL.threads = 1;
         iqclassify::ModulationClassifier clf(cfg);
+        iqclassify::ModulationClassifier clf1(cfg1);
         iqclassify::ModulationClassifier clfL(cfgL);
         iqclassify::Channelizer chz(cfg);
         std::size_t found = 0;
@@ -144,18 +148,20 @@ int main() {
                 }
             },
             reps);
+        const double ms1 = timeMedian(
+            [&] { clf1.classify(buf.data(), buf.size()); }, reps);
         const double msL = timeMedian(
             [&] { clfL.classify(buf.data(), buf.size()); }, reps);
         const double msK = timeMedian(
             [&] { chz.channelize(buf.data(), buf.size(), 1); }, reps);
-        std::printf("%9zu %7d | %12.2f %12.2f %12.2f | %6zu %8.2f | %s\n", n,
-                    npulse, msC, msL, msK, found, n / 1e6 / (msC / 1e3),
+        std::printf("%9zu %7d | %12.2f %12.2f %12.2f %12.2f | %6zu %8.2f | %s\n", n,
+                    npulse, msC, ms1, msL, msK, found, n / 1e6 / (msC / 1e3),
                     labels.c_str());
         std::fflush(stdout);
     }
     std::printf("\nPeak RSS: %.1f MiB\n", peakRssMb());
-    std::printf("(classify = kanalisierter Default-Pfad, legacy = "
-                "channelize=false, kanal. = Channelizer::channelize allein; "
+    std::printf("(auto = threads=auto (min(hw,8)), 1thr = threads=1, legacy = "
+                "channelize=false + threads=1, kanal. = Channelizer::channelize; "
                 "Median ueber Wiederholungen)\n");
     return 0;
 }

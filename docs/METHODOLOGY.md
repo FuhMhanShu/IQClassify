@@ -253,7 +253,7 @@ ist dort mit seiner Bedeutung kommentiert. Eine Änderung erfordert eine
 Die Referenzimplementierung führt die C++-Pipeline elementweise aus
 (äquivalente Arithmetik) und wurde gegen eine erweiterte Qualitätsmatrix
 aus 168 Szenarien gefahren. Die C++-Testsuite (tests/test_main.cpp,
-134 Szenarien) deckt den verifizierten robusten Bereich ab; jedes Szenario
+136 Szenarien) deckt den verifizierten robusten Bereich ab; jedes Szenario
 der Suite wurde in der Referenz über mindestens drei Seeds bestätigt.
 
 - Basiskalibrierung, SNR 20 dB, sps 8: 9/9 korrekt (BPSK, QPSK, FSK2,
@@ -330,6 +330,14 @@ Eingabesicherung (defense in depth, mehrschichtig):
   (Sample 0) und am Pufferende, 60 dB SNR, Mini-Puffer n = 1..70, Puffer
   vollständig vom Puls ausgefüllt (Segmenter braucht eine stille Referenz —
   dokumentierte Grenze: 0 Pulse).
+
+## Parallelverarbeitung
+
+Ab ~32k Samples Pufferlänge werden Segment-Detektion und die Verarbeitung der
+( Segment, Kanalband)-Paare auf `threads` Threads verteilt (Default automatisch
+min(hardware_concurrency, 8), `threads=1` seriell); `Channelizer::channelize`
+parallelisiert die Kanal-Extraktion. Ergebnisse sind threadzahl-unabhängig
+identisch (Abschnitt 19). Messung: docs/PERFORMANCE.md (~2,5-3× bei 2M Samples).
 
 ## Performance-Optimierung
 
