@@ -133,6 +133,31 @@ std::vector<cd> genCw(std::mt19937& rng, std::size_t nsamp) {
     return out;
 }
 
+std::vector<cd> applyEnv(const std::vector<cd>& sig, int mode, double depth,
+                         std::mt19937& rng) {
+    std::uniform_real_distribution<double> u01(0.0, 1.0);
+    const std::size_t n = sig.size();
+    std::vector<cd> out(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        double e;
+        if (mode == 0) {
+            e = 1.0 - depth * u01(rng);
+        } else if (mode == 1) {
+            e = (1.0 - depth) +
+                depth * 0.5 * (1.0 + std::sin(2.0 * kPi * i /
+                                               static_cast<double>(n)));
+        } else {
+            const double x = static_cast<double>(i) / static_cast<double>(n);
+            e = 1.0 - depth * std::exp(-std::pow((x - 0.5) * 8.0, 2.0));
+        }
+        out[i] = sig[i] * e;
+    }
+    const double p = meanPower(out);
+    const double sc = 1.0 / std::sqrt(p > 1e-30 ? p : 1e-30);
+    for (cd& v : out) v *= sc;
+    return out;
+}
+
 std::vector<cd> genOfdm(std::mt19937& rng, int nfft, int cp, int nsym,
                         double load) {
     int nact = std::max(16, static_cast<int>(nfft * load));

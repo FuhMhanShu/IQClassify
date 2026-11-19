@@ -25,7 +25,9 @@ void fftInPlace(std::vector<cd>& a, bool invert) {
     // pocketfft unterstuetzt beliebige Laengen; die Aufrufer nutzen
     // Zweierpotenzen (Leistungstransformation der Praefixplaene).
     pocketfft::shape_t shape{n};
-    pocketfft::stride_t stride(sizeof(cd));
+    // stride_t ist ein Vektor je Dimension: ein einzelnes Element mit dem
+    // Byte-Abstand der Samples (std::complex<double> ist dicht gepackt).
+    pocketfft::stride_t stride{static_cast<ptrdiff_t>(sizeof(cd))};
     pocketfft::shape_t axes{0};
     const double fct = invert ? 1.0 / static_cast<double>(n) : 1.0;
     pocketfft::c2c<double>(shape, stride, stride, axes, !invert,

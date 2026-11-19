@@ -45,6 +45,19 @@ if(IQCLASSIFY_BUILD_TESTS)
     add_test(NAME iqclassify_tests COMMAND iqclassify_tests)
 endif()
 
+# Generator fuer die README-Bilder (docs/images/*.png), aus dem Repo-Root:
+#   ./build/iqclassify_readme_images
+option(IQCLASSIFY_BUILD_TOOLS "README-Bildgenerator bauen" ON)
+if(IQCLASSIFY_BUILD_TOOLS)
+    add_executable(iqclassify_readme_images
+        tools/readme_images.cpp
+        tests/SignalGenerator.cpp)
+    target_include_directories(iqclassify_readme_images PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    target_link_libraries(iqclassify_readme_images PRIVATE IQClassify)
+endif()
+
 # Installations-Support (optional)
 include(GNUInstallDirs)
 install(TARGETS IQClassify ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})

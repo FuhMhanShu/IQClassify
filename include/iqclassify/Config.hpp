@@ -22,6 +22,10 @@ struct ClassifierConfig {
     std::size_t minPulseLen = 400;   // minimale akzeptierte Pulslaenge
     double cropOnRelDb = 12.0;       // Crop-Ein: innerhalb dieses Bereichs des Slice-Maximums
     double cropOffRelDb = 20.0;      // Crop-Aus: unterhalb dieses Bereichs des Slice-Maximums
+    double cropFadeMergeDb = 5.0;    // Fade-Merge: zwei Crops verschmelzen, wenn die
+                                     // Luecke nie unter (cropFadeMergeDb ueber dem
+                                     // slice-eigenen Minimum) fiel, also kein
+                                     // Schweigen, sondern ein Amplituden-Einbruch ist
 
     // ---- Banddetektion
     std::size_t detectWin = 4096;   // Teilfensterlaenge der Detektions-FFTs

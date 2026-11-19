@@ -23,6 +23,19 @@ Sind zwei Pulse sowohl zeitlich als auch spektral überlappt (gleiche
 Frequenzlage), sind sie physikalisch nicht trennbar und werden als ein
 Puls klassifiziert; dies ist eine dokumentierte Grenze, kein Fehler.
 
+## Lokalisierung
+
+Jeder erkannte Puls muss im IQ-Signal wiederfindbar sein:
+
+- samplegenaue Zeitlage (`startSampleFine`/`numSamplesFine` in Samples,
+  `t = startSample / fs`),
+- Sub-Bin-Mittenfrequenz (`centerFreqRefined`, fraktional zur Abtastrate,
+  zyklisch in [0,1), `f = centerFreqRefined * fs`),
+- `extractPulse`/`extractPulseF`: Basisband-Slice des Pulses aus dem
+  Originalpuffer (Zeitfenster der feinen Lage, Bandpass um die feine
+  Mittenfrequenz), sodass der Puls ohne erneute Suche weiterverarbeitet
+  werden kann.
+
 ## Rahmenbedingungen
 
 - Einbindung als statische Bibliothek, unterstützt via CMake

@@ -315,6 +315,37 @@ std::vector<std::pair<std::size_t, std::size_t>> timeCrops(
         const std::size_t i1 = std::min(n, nb * w);
         if (i1 - i0 >= cfg.minPulseLen) crops.emplace_back(i0, i1);
     }
+    // Fade-Merge: ein Puls mit schwankender Amplitude kann durch die relative
+    // Aus-Schwelle (cropOffRelDb) in mehrere Crops zerlegt werden. Liegt die
+    // Energie in der Luecke zwischen zwei Crops nie nahe dem slice-eigenen
+    // Minimum (energetisch kein Schweigen, sondern ein Amplituden-Einbruch),
+    // gehoeren beide Crops zum selben Puls und werden verschmolzen.
+    if (crops.size() > 1 && !energy.empty()) {
+        double emin = *std::min_element(energy.begin(), energy.end());
+        if (emin < 1e-30) emin = 1e-30;
+        const double mergeThr =
+            std::pow(10.0, cfg.cropFadeMergeDb / 10.0) * emin;
+        std::vector<std::pair<std::size_t, std::size_t>> merged;
+        merged.push_back(crops.front());
+        for (std::size_t i = 1; i < crops.size(); ++i) {
+            // Luecke auf die rohen Hysterese-Grenzen (ohne angelagerten
+            // Sicherheitsrand) erweitern, damit der Fade-Tiefpunkt erfasst wird.
+            std::size_t gapLo = 0;
+            if (merged.back().second >= w + cfg.segMargin)
+                gapLo = (merged.back().second - w - cfg.segMargin) / w;
+            const std::size_t gapHi =
+                std::min(nb, (crops[i].first + cfg.segMargin) / w);
+            double gmin = 1e300;
+            for (std::size_t g = gapLo; g < gapHi; ++g)
+                gmin = std::min(gmin, energy[g]);
+            if (gapHi > gapLo && gmin > mergeThr) {
+                merged.back().second = crops[i].second;
+            } else {
+                merged.push_back(crops[i]);
+            }
+        }
+        crops.swap(merged);
+    }
     return crops;
 }
 

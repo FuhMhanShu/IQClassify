@@ -94,7 +94,10 @@ CpEvidence cpAutocorrPeak(const std::vector<cd>& y,
     auto rv = [&](long t) {
         const double denom =
             r0 * (1.0 - static_cast<double>(t) / static_cast<double>(n));
-        return std::abs(buf[static_cast<std::size_t>(t)].real()) /
+        // Komplexer Betrag: die Autokorrelation bei Lag t traegt die Phase
+        // des Resttraegers (e^{-j*2pi*f_res*t}); nur der Realteil wuerde
+        // bei sub-Bin-Restoffset den CP-Peak zufaellig ausloeschen.
+        return std::abs(buf[static_cast<std::size_t>(t)]) /
                (denom > 1e-30 ? denom : 1e-30);
     };
     const long tauMax =
@@ -177,7 +180,7 @@ bool cpHalfConsistency(const std::vector<cd>& y, const ClassifierConfig& cfg,
         long bt = 0;
         for (long t = cfg.ofdmTauMin; t < tmax; ++t) {
             const double num =
-                std::abs(buf[static_cast<std::size_t>(t)].real());
+                std::abs(buf[static_cast<std::size_t>(t)]);
             if (num <= 0.0) continue;
             const double v = num / (r0 * (1.0 - static_cast<double>(t) /
                                                 static_cast<double>(m)));
@@ -782,9 +785,59 @@ std::vector<PulseResult> ModulationClassifier::classify(
                 CoarseClass coarse = CoarseClass::Unknown;
                 if (!stage1(f, cfg, &coarse)) continue;
                 const auto res = stage2(f, cfg, coarse, ys);
+                // Feine Zeitlage (samplegenau): Huellkurven-Schwelle im
+                // Crop, relativ zum Crop-Maximum. Die Raender des Crops
+                // (Sicherheitsrand, Blockraster) fallen darunter weg.
+                std::size_t i0 = 0;
+                std::size_t i1 = ys.size();
+                {
+                    double emax = 0.0;
+                    for (const cd& v : ys)
+                        emax = std::max(emax, std::abs(v));
+                    if (emax > 0.0 && ys.size() > 2) {
+                        const double thr = 0.25 * emax;
+                        std::size_t a0 = 0;
+                        while (a0 < ys.size() && std::abs(ys[a0]) <= thr)
+                            ++a0;
+                        std::size_t a1 = ys.size();
+                        while (a1 > a0 && std::abs(ys[a1 - 1]) <= thr)
+                            --a1;
+                        if (a1 > a0) {
+                            i0 = a0;
+                            i1 = a1;
+                        }
+                    }
+                }
+                // Sub-Bin-Mittenfrequenz: leistungsgewichteter
+                // Schwerpunkt des In-Band-PSD (zyklische Bins ab band.lo).
+                double fcRef = wrap01(slice.fc);
+                {
+                    const long nftL = static_cast<long>(det.nft);
+                    if (nftL > 0 && !det.psdDb.empty() &&
+                        band.width() > 0) {
+                        double num = 0.0;
+                        double den = 0.0;
+                        for (long k = band.lo; k < band.hi; ++k) {
+                            const long kk = ((k % nftL) + nftL) % nftL;
+                            const double p =
+                                std::pow(10.0, det.psdDb[static_cast<
+                                    std::size_t>(kk)] / 10.0);
+                            num += static_cast<double>(k - band.lo) * p;
+                            den += p;
+                        }
+                        if (den > 0.0) {
+                            fcRef = wrap01(
+                                (static_cast<double>(band.lo) + num / den) /
+                                static_cast<double>(det.nft));
+                        }
+                    }
+                }
                 PulseResult r;
                 r.startSample = a + c0;
                 r.numSamples = len;
+                r.startSampleFine = a + c0 + i0;
+                r.numSamplesFine = i1 - i0;
+                r.centerFreqRefined = fcRef;
                 r.centerFreqNorm = static_cast<float>(
                     roundTo(wrap01(slice.fc), 5));
                 r.bandwidthNorm =
@@ -814,12 +867,68 @@ std::vector<PulseResult> ModulationClassifier::classify(
 
 std::vector<PulseResult> ModulationClassifier::classifyF(
     const std::complex<float>* iq, std::size_t n) const {
+    // Haertung: Nullzeiger und Laenge 0 sind definiert leer (wie classify).
+    if (iq == nullptr || n == 0) return {};
     std::vector<std::complex<double>> buf(n);
     for (std::size_t i = 0; i < n; ++i) {
         buf[i] = std::complex<double>(static_cast<double>(iq[i].real()),
                                       static_cast<double>(iq[i].imag()));
     }
     return classify(buf.data(), buf.size());
+}
+
+std::vector<std::complex<double>> ModulationClassifier::extractPulse(
+    const std::complex<double>* iq, std::size_t n,
+    const PulseResult& pulse) const {
+    std::vector<std::complex<double>> out;
+    // Haertung: Nullzeiger/leere Eingabe sind definiert leer.
+    if (iq == nullptr || n == 0) return out;
+    std::size_t s = pulse.startSampleFine;
+    std::size_t len = pulse.numSamplesFine;
+    if (len == 0 || s >= n) {
+        // Fallback auf das grobe Fenster, falls das feine fehlt.
+        s = pulse.startSample;
+        len = pulse.numSamples;
+    }
+    if (len == 0 || s >= n) return out;
+    len = std::min(len, n - s);
+    std::size_t nft = detail::pow2ceil(len);
+    if (nft < 16) nft = 16;
+    double fc = std::fmod(pulse.centerFreqRefined, 1.0);
+    if (fc < 0.0) fc += 1.0;
+    double bw = static_cast<double>(pulse.bandwidthNorm);
+    if (!(bw > 0.0)) bw = 1.0 / static_cast<double>(nft);
+    // Bandmaske um die feine Mittenfrequenz (zyklische Bin-Koordinaten,
+    // BandExtractor::extract fuegt den Waechter selbst hinzu).
+    const long lo = static_cast<long>(std::lround(
+        (fc - 0.5 * bw) * static_cast<double>(nft)));
+    long hi = static_cast<long>(std::lround(
+        (fc + 0.5 * bw) * static_cast<double>(nft)));
+    if (hi - lo < 1) hi = lo + 1;
+    const BandExtractor bxs(cfg_);
+    const BandExtractor::Slice slice =
+        bxs.extract(iq, s, s + len, Band{lo, hi}, nft);
+    return slice.y;
+}
+
+std::vector<std::complex<float>> ModulationClassifier::extractPulseF(
+    const std::complex<float>* iq, std::size_t n,
+    const PulseResult& pulse) const {
+    std::vector<std::complex<float>> out;
+    if (iq == nullptr || n == 0) return out;
+    std::vector<std::complex<double>> buf(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        buf[i] = std::complex<double>(static_cast<double>(iq[i].real()),
+                                      static_cast<double>(iq[i].imag()));
+    }
+    const std::vector<std::complex<double>> s =
+        extractPulse(buf.data(), buf.size(), pulse);
+    out.reserve(s.size());
+    for (const auto& v : s) {
+        out.push_back(std::complex<float>(static_cast<float>(v.real()),
+                                          static_cast<float>(v.imag())));
+    }
+    return out;
 }
 
 }  // namespace iqclassify

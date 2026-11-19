@@ -39,6 +39,23 @@ public:
     std::vector<PulseResult> classifyF(const std::complex<float>* iq,
                                       std::size_t n) const;
 
+    // Liefert den Basisband-Slice eines bereits klassifizierten Pulses
+    // aus dem IQ-Puffer (zum Wiederfinden des Pulses im Signal):
+    // Zeitfenster [startSampleFine, startSampleFine + numSamplesFine),
+    // Bandpass um centerFreqRefined mit bandwidthNorm. Rueckgabe[k]
+    // entspricht iq[startSampleFine + k], frequenzverschoben auf die
+    // Mittenfrequenz des Pulses (Rueckverschiebung mit
+    // e^{+j*2pi*centerFreqRefined*k}). Nullzeiger/leere Eingabe oder ein
+    // Puls ausserhalb des Puffers liefern ein leeres Ergebnis.
+    std::vector<std::complex<double>> extractPulse(
+        const std::complex<double>* iq, std::size_t n,
+        const PulseResult& pulse) const;
+
+    // float-Variante von extractPulse.
+    std::vector<std::complex<float>> extractPulseF(
+        const std::complex<float>* iq, std::size_t n,
+        const PulseResult& pulse) const;
+
     const ClassifierConfig& config() const { return cfg_; }
 
 private:

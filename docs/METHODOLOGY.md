@@ -56,6 +56,37 @@ Toren gegen das Slice-Maximum (12/20 dB). Hat der Slice kein eigenes
 Schweigen (ein Puls füllt das Segment), wird der gesamte Slice als ein
 Puls ausgegeben.
 
+Fade-Merge (Amplitudenschwankung): Ein Puls mit schwankender Amplitude kann
+durch die relative Aus-Schwelle (20 dB unter Slice-Maximum) in mehrere Crops
+zerlegt werden. Nach der Hysterese werden benachbarte Crops wieder
+verschmolzen, wenn die Blockenergie in der Luecke zwischen ihnen (auf die
+rohen Hysterese-Grenzen erweitert) nie unter `cropFadeMergeDb` (5 dB) über
+dem slice-eigenen Minimum lag — die Luecke ist dann energetisch kein
+Schweigen, sondern ein Amplituden-Einbruch desselben Pulses. Fällt der
+Einbruch bis auf den Rauschboden, ist er physikalisch nicht von zwei
+getrennten Pulsen unterscheidbar (dokumentierte Grenze).
+
+## Lokalisierung (Wiederfinden des Pulses im IQ-Signal)
+
+Jedes `PulseResult` trägt neben dem groben Blockraster-Fenster eine feine
+Lage, direkt aus den Zwischengroessen der Pipeline abgeleitet:
+
+- Zeit (samplegenau): Hüllkurve des (bandgefilterten, sanitisierten) Crops;
+  erstes und letztes Sample oberhalb 25 % des Crop-Maximums. Die Raender des
+  Crops (Sicherheitsrand, Blockraster der Segmentierung) fallen damit weg.
+  Umrechnung: `t = startSampleFine / fs`.
+- Frequenz (Sub-Bin): leistungsgewichteter Schwerpunkt des In-Band-PSD
+  (Max-Hold-Detektionsspektrum, lineare Leistung) über den detektierten
+  Baendern, zyklisch ab `band.lo`; bei schmalen Tönen (CW) liegt der
+  Schwerpunkt auf der Tonbin, bei breiten Baendern in der Bandmitte.
+  Umrechnung: `f = centerFreqRefined * fs` (zyklisch in [0,1)).
+- `ModulationClassifier::extractPulse` extrahiert den Puls anschließend
+  direkt aus dem Originalpuffer: Zeitfenster `[startSampleFine,
+  startSampleFine + numSamplesFine)`, Bandmaske um `centerFreqRefined` mit
+  `bandwidthNorm` (über `BandExtractor::extract`, inkl. Wächter), IFFT und
+  Rückverschiebung auf die Bandmitte. `slice[k]` entspricht
+  `iq[startSampleFine + k] * e^{-j*2pi*f0*k}`.
+
 ## Phase 2: Merkmale
 
 Auf jedem (Band, Crop):
@@ -149,7 +180,7 @@ ist dort mit seiner Bedeutung kommentiert. Eine Änderung erfordert eine
 Die Referenzimplementierung führt die C++-Pipeline elementweise aus
 (äquivalente Arithmetik) und wurde gegen eine erweiterte Qualitätsmatrix
 aus 168 Szenarien gefahren. Die C++-Testsuite (tests/test_main.cpp,
-94 Szenarien) deckt den verifizierten robusten Bereich ab; jedes Szenario
+106 Szenarien) deckt den verifizierten robusten Bereich ab; jedes Szenario
 der Suite wurde in der Referenz über mindestens drei Seeds bestätigt.
 
 - Basiskalibrierung, SNR 20 dB, sps 8: 9/9 korrekt (BPSK, QPSK, FSK2,
@@ -221,3 +252,11 @@ Eingabesicherung (defense in depth, mehrschichtig):
   ruhige Teilphase im Puffer: ein durchgehendes Signal ohne jede
   Schweigephase liefert keinen Rauschboden und damit keinen Puls.
 - Symbolraten außerhalb 1.6..n/12 Samples/Symbol werden nicht verfolgt.
+- Amplitudenschwankungen: langsame Fades (z. B. 6 dB Sinus, gauss'scher
+  Mitteneinbruch bis -20 dB bei hohem SNR) und pro-Sample-Zufallsamplitude
+  (0.3..1) bleiben ein Puls und werden korrekt klassifiziert. Ein Fade, der
+  bis auf den Rauschboden reicht, wird wie zwei Pulse behandelt
+  (physikalisch nicht trennbar). Per-Sample-weisse AM auf FSK2 verwischt die
+  Tonscheiben zu breitbandigem Splatter (Grenze). Leise Pulsanteile unterhalb
+  von ~8 dB ueber dem Rauschboden (z. B. der Anfang einer Rampe bei 20 dB
+  SNR) liegen unter der Ein-Schwelle und werden nicht mitdetektiert.
