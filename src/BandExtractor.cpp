@@ -17,7 +17,11 @@ BandExtractor::BandDetection BandExtractor::bands(const std::complex<double>* x,
     const std::size_t L = b - a;
     const std::size_t wlen = std::min(L, cfg.detectWin);
     if (wlen < 16) {
+        // Haertung: Auch im Fruehabruch muss psdDb eine definierende
+        // Fuellung tragen (nft Bins), damit estimateSnrFlat nie auf ein
+        // leeres PSD stoesst (Modulo-Division durch 0).
         det.nft = detail::pow2ceil(L) < 16 ? 16 : detail::pow2ceil(L);
+        det.psdDb.assign(det.nft, -300.0);
         return det;
     }
     const std::size_t nft = detail::pow2ceil(wlen);
@@ -33,8 +37,16 @@ BandExtractor::BandDetection BandExtractor::bands(const std::complex<double>* x,
     for (std::size_t s = 0; s < lastStart; s += (hop ? hop : 1)) {
         std::vector<detail::cd> buf(nft, detail::cd(0.0, 0.0));
         const std::size_t lim = std::min(wlen, L - s);
-        for (std::size_t t = 0; t < lim; ++t)
-            buf[t] = x[a + s + t] * win[t];
+        for (std::size_t t = 0; t < lim; ++t) {
+            const detail::cd v = x[a + s + t];
+            // Haertung: NaN/Inf vergiften via FFT das ganze Fenster,
+            // als Ausfall (Null) behandeln.
+            if (!std::isfinite(v.real()) || !std::isfinite(v.imag())) {
+                buf[t] = detail::cd(0.0, 0.0);
+            } else {
+                buf[t] = v * win[t];
+            }
+        }
         detail::fftInPlace(buf, false);
         for (std::size_t k = 0; k < nft; ++k) {
             const double v = buf[k].real() * buf[k].real() +
@@ -192,7 +204,14 @@ BandExtractor::Slice BandExtractor::extract(const std::complex<double>* x,
     if (padded % nft) padded = detail::pow2ceil(padded);
     const long scale = static_cast<long>(padded / nft);
     std::vector<detail::cd> buf(L);
-    for (std::size_t i = 0; i < L; ++i) buf[i] = x[a + i];
+    // Haertung: nicht-endliche Samples als Ausfall (Null) behandeln,
+    // sonst vergiften sie das komplette Spektrum des Puffers.
+    for (std::size_t i = 0; i < L; ++i) {
+        const std::complex<double> v = x[a + i];
+        buf[i] = std::isfinite(v.real()) && std::isfinite(v.imag())
+                     ? detail::cd(v.real(), v.imag())
+                     : detail::cd(0.0, 0.0);
+    }
     buf.resize(padded, detail::cd(0.0, 0.0));
     detail::fftInPlace(buf, false);
     // Maske mit Waechter: die vollstaendige Uebergangszone des Pulses
@@ -235,10 +254,22 @@ void estimateSnrFlat(const std::vector<double>& psdDb, const Band& band,
                      const ClassifierConfig& cfg,
                      const std::vector<Band>& allBands, double* snrDb,
                      double* flatDb) {
+    // Haertung: leeres PSD oder degenerierte Bandbreite sind definiert zu
+    // behandeln statt durch 0 zu teilen.
+    if (psdDb.empty() || snrDb == nullptr || flatDb == nullptr) {
+        if (snrDb) *snrDb = -99.0;
+        if (flatDb) *flatDb = 0.0;
+        return;
+    }
     const long nftL = static_cast<long>(psdDb.size());
     const long lo = band.lo;
     const long hi = band.hi;
     const long width = hi - lo;
+    if (width <= 0 || nftL <= 0) {
+        *snrDb = -99.0;
+        *flatDb = 0.0;
+        return;
+    }
     (void)cfg;
     std::vector<double> inb;
     inb.reserve(static_cast<std::size_t>(width));

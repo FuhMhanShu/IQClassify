@@ -49,6 +49,18 @@ double db10(double v) {
 }
 
 double median(std::vector<double>& v) {
+    // Haertung: nicht-endliche Werte aussortieren. std::sort mit NaN
+    // verletzt die strikte schwache Ordnung und waere undefiniertes
+    // Verhalten (bis hin zu Abstuerzen). Endliche Stichproben bleiben
+    // unberuehrt.
+    std::size_t w = 0;
+    for (std::size_t i = 0; i < v.size(); ++i) {
+        if (std::isfinite(v[i])) {
+            if (w != i) v[w] = v[i];
+            ++w;
+        }
+    }
+    v.resize(w);
     if (v.empty()) return 0.0;
     std::sort(v.begin(), v.end());
     const std::size_t m = v.size();

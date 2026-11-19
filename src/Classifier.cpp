@@ -207,6 +207,10 @@ std::pair<double, double> rsFromCyclic(const std::vector<double>& env2,
     std::vector<cd> buf(nft, cd(0.0, 0.0));
     for (std::size_t i = 0; i < n; ++i)
         buf[i] = cd(env2[i] - mean, 0.0);
+    // Zeitsignal vor der Transformation sichern: Die sub-Bin-Verfeinerung
+    // maximiert die zyklische Kohaerenz UEBER DEM ZEITSIGNAL; buf selbst
+    // wird durch die in-place-FFT zum Spektrum.
+    const std::vector<cd> tsig = buf;
     detail::fftInPlace(buf, false);
     const long kLo = std::max(1L, static_cast<long>(
                                      std::floor(bw / 1.50 *
@@ -254,7 +258,7 @@ std::pair<double, double> rsFromCyclic(const std::vector<double>& env2,
         cd acc(0.0, 0.0);
         double ph = 0.0;
         const double stp = 2.0 * kPi * f;
-        for (const cd& v : buf) {
+        for (const cd& v : tsig) {
             ph += stp;
             acc += v * cd(std::cos(ph), -std::sin(ph));
         }
@@ -733,6 +737,8 @@ std::vector<PulseResult> ModulationClassifier::classify(
     const std::complex<double>* iq, std::size_t n) const {
     const ClassifierConfig& cfg = cfg_;
     std::vector<PulseResult> results;
+    // Haertung: leere Eingabe und Nullzeiger sind definiert leer.
+    if (iq == nullptr || n == 0) return results;
     const PulseSegmenter seg(cfg);
     const BandExtractor bxs(cfg);
     for (const auto& ab : seg.detect(iq, n)) {
@@ -755,6 +761,16 @@ std::vector<PulseResult> ModulationClassifier::classify(
                                        static_cast<std::ptrdiff_t>(c0),
                                    slice.y.begin() +
                                        static_cast<std::ptrdiff_t>(c1));
+                // Haertung: nicht-endliche Samples als Null behandeln.
+                // NaN/Inf duerfen weder Statistiken vergiften noch in
+                // Indexumrechnungen einfliessen; ein Dropout verhaelt
+                // sich damit wie Stille. (Konsistent mit dem Oracle.)
+                for (cd& v : ys) {
+                    if (!std::isfinite(v.real()) ||
+                        !std::isfinite(v.imag())) {
+                        v = cd(0.0, 0.0);
+                    }
+                }
                 double snrDb = 0.0;
                 double flatDb = 0.0;
                 estimateSnrFlat(det.psdDb, band, cfg, bands, &snrDb,

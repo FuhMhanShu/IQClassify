@@ -61,6 +61,11 @@ Ergebnis je erkanntem Puls:
 
 - `classify` / `classifyF` durchsuchen den gesamten Puffer und liefern ein
   Ergebnis je erkanntem Puls, zeitlich sortiert.
+- Härtung: Nullzeiger und Länge 0 liefern ein leeres Ergebnis. Nicht
+  endliche Samples (NaN, Inf) werden an jeder Stelle der Pipeline als
+  Ausfall (Null) behandelt und vergiften dadurch weder FFT-Fenster noch
+  Statistiken; ein einzelner NaN-Dropout verhält sich wie eine kurze
+  Schweigephase im Puls (siehe docs/METHODOLOGY.md, Abschnitt Härtung).
 - Die Methoden sind `const` und thread-sicher, solange jeder Thread eine
   eigene Instanz nutzt (PocketFFT-Plancache ist global und
   thread-sicher ab modifizierten Versionen; Aufrufe erfolgen

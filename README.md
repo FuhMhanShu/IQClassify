@@ -21,7 +21,14 @@ klassifiziert die Modulationsart jedes Pulses in zwei Stufen:
   verschiedenen Frequenzbaendern.
 - Klassenkapselung: eine Fassade (`ModulationClassifier`), alle
   Schwellwerte konfigurierbar (`ClassifierConfig`).
-- Deterministische Testsuite ohne externes Testframework.
+- Deterministische Testsuite ohne externes Testframework: 94 Szenarien
+  aus der Qualitaetsmatrix (SNR-Raster, Oversampling, Frequenzlagen,
+  Chirp-Varianten, Pulslaengen, Mehrpuls, Seed-Streuung) plus
+  Haertungsfaelle (Nullzeiger, leere und NaN-beladene Eingaben,
+  Dropouts im Puls).
+- Haertung der Eingabepfade: NaN/Inf-Samples verhalten sich wie
+  Schweigephasen und vergiften weder FFT-Fenster noch Statistiken
+  (siehe docs/METHODOLOGY.md).
 
 ## Bauen mit CMake
 

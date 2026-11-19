@@ -39,14 +39,37 @@ Features extractFeatures(const std::vector<std::complex<double>>& y,
         me = n ? acc / static_cast<double>(n) : 0.0;
         envSum = acc;
     }
-    // Traegerkohaerenz: |mean(z)| / mean(|z|). Ein reiner Ton behaelt
-    // einen Wert nahe 1; jede Phasen- oder Frequenzmodulation mittelt
-    // den Zeiger weg. Trennt BPSK (ruhiges f_inst innerhalb der
-    // Symbole) vom unmodulierten Traeger.
+    // Momentane Phase/Frequenz und Resttraeger: zuerst berechnen, da die
+    // Traegerkohaerenz den Resttraeger (Median von f_inst) entfernen muss.
+    std::vector<double> up;
+    double med = 0.0;
     {
-        std::complex<double> msr(0.0, 0.0);
-        for (const auto& v : y) msr += v;
-        f.carrCoh = std::abs(msr) / (envSum > 1e-12 ? envSum : 1e-12);
+        up = detail::unwrapPhase(y);
+        f.finst.resize(n >= 1 ? n - 1 : 0);
+        for (std::size_t i = 1; i < n; ++i)
+            f.finst[i - 1] = (up[i] - up[i - 1]) / (2.0 * kPi);
+        med = detail::medianOf(f.finst);
+        f.residF = med;
+        for (double& v : f.finst) v -= med;
+        f.ph.resize(n);
+        for (std::size_t i = 0; i < n; ++i)
+            f.ph[i] = up[i] - 2.0 * kPi * med * static_cast<double>(i);
+    }
+    // Traegerkohaerenz nach Entfernung des Resttraegers:
+    // |mean(z * e^{-j*2pi*med*i})| / mean(|z|). Ohne Entfernung wuerde ein
+    // sub-Bin-Restoffset (Bandmitte liegt auf quantisiertem FFT-Raster)
+    // den Zeiger ueber lange Crop-Laengen wegmitteln (Sinc-Ausloeschung)
+    // und die CW-Erkennung crop-laengen- und positionsabhaengig machen.
+    // Trennt weiterhin BPSK/QPSK (Phasenspruenge mitteln den Zeiger weg)
+    // vom unmodulierten Traeger.
+    {
+        std::complex<double> acc(0.0, 0.0);
+        for (std::size_t i = 0; i < n; ++i) {
+            const double ang = up[i] - 2.0 * kPi * med *
+                static_cast<double>(i);
+            acc += std::polar(f.env[i], ang);
+        }
+        f.carrCoh = std::abs(acc) / (envSum > 1e-12 ? envSum : 1e-12);
     }
     {   // CV / PAPR
         double ve = 0.0;
@@ -76,18 +99,6 @@ Features extractFeatures(const std::vector<std::complex<double>>& y,
             }
         }
         f.paprWDb = detail::db10(wmax / (W * pm > 1e-30 ? W * pm : 1e-30));
-    }   // momentane Phase/Frequenz
-    {
-        const std::vector<double> up = detail::unwrapPhase(y);
-        f.finst.resize(n >= 1 ? n - 1 : 0);
-        for (std::size_t i = 1; i < n; ++i)
-            f.finst[i - 1] = (up[i] - up[i - 1]) / (2.0 * kPi);
-        const double med = detail::medianOf(f.finst);
-        f.residF = med;
-        for (double& v : f.finst) v -= med;
-        f.ph.resize(n);
-        for (std::size_t i = 0; i < n; ++i)
-            f.ph[i] = up[i] - med * static_cast<double>(i);
     }
     // Chirp-Fit auf f_inst, hoellkurven^2-gewichtet, mittlere 80 %
     const std::size_t n1 = n >= 1 ? n - 1 : 0;
@@ -162,6 +173,9 @@ Features extractFeatures(const std::vector<std::complex<double>>& y,
     for (std::size_t i = 0; i < n1; ++i) {
         if (f.env[i] < cfg.histEnvRel * me) continue;
         const double pos = (f.finst[i] / bwEff + 0.5) * static_cast<double>(nbins);
+        // Haertung: NaN-Schutz; ein Cast von NaN nach long waere
+        // undefiniert (Defense in Depth, Input ist bereits sanitisiert).
+        if (!std::isfinite(pos)) continue;
         const long bi = static_cast<long>(pos);
         if (bi >= 0 && bi < nbins) {
             hist[static_cast<std::size_t>(bi)] += 1.0;

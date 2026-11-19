@@ -3,7 +3,7 @@
 #   qmake IQClassifyTests.pro && make && ./iqclassify_tests
 #
 # Kompiliert die Bibliotheksquellen direkt hinein (kein Link-Schritt
-# gegen eine previously gebaute Bibliothek noetig).
+# gegen eine zuvor gebaute Bibliothek noetig).
 
 TARGET      = iqclassify_tests
 TEMPLATE    = app

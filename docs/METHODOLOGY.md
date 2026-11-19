@@ -60,9 +60,16 @@ Puls ausgegeben.
 
 Auf jedem (Band, Crop):
 - Hüllkurve: CV, PAPR, fenstergemitteltes PAPR (Fenster 16).
-- Trägerkohärenz carrCoh = |mean(z)| / mean(|z|): Ein reiner Ton hält
-  den Wert nahe 1, jede Modulation mittelt den Zeiger weg. Trennt BPSK
-  (ruhiges f_inst innerhalb der Symbole) vom CW-Ton.
+- Trägerkohärenz carrCoh = |mean(z * e^{-j*2pi*f_res*t})| / mean(|z|):
+  Ein reiner Ton hält den Wert nahe 1, jede Modulation mittelt den Zeiger
+  weg. Entscheidend ist die vorherige Entfernung des Restträgers
+  (Median der Momentanfrequenz): die Bandmitte liegt auf dem quantisierten
+  FFT-Raster, ein sub-Bin-Restoffset würde den Zeiger über lange Crop-
+  Längen wegmitten (Sinc-Auslöschung) und die CW-Erkennung pulslängen-
+  und positionsabhängig machen. Ohne diese Entfernung versagte der
+  Ton-Test beispielsweise bei einem 1000-Sample-CW-Puls und bei CW neben
+  einem Chirp. Trennt weiterhin BPSK (Phasensprünge mitteln den Zeiger
+  weg) vom unmodulierten Träger.
 - Momentanfrequenz: kontinuierliche Phase, Median-Restträger-Entfernung.
 - Chirp-Fit: lineare Regression auf f_inst, hüllkurven²-gewichtet,
   mittlere 80 % des Pulses; Bestimmtheitsmaß r² und Hub/Bandbreite.
@@ -75,7 +82,7 @@ Auf jedem (Band, Crop):
 Reihenfolge (jede Regel schließt ab):
 1. SNR-Gate: SNR < minSnrDb (6 dB) überspringt den Abschnitt.
 2. Ton: Anteil der Samples mit |f_inst| < 0.004 über 70 % und
-   Trägerkohérence > 0.85. Der Test ist unabhängig von der detektierten
+   Trägerkohärenz > 0.85. Der Test ist unabhängig von der detektierten
    Bandbreite; der Splatter benachbarter Pulse darf einen CW-Puls nicht in
    die Phasenanalyse drängen.
 3. Schmalband (<= 14 Bins): Frequenz-Pfad.
@@ -139,19 +146,78 @@ ist dort mit seiner Bedeutung kommentiert. Eine Änderung erfordert eine
 
 ## Validierung (Referenzimplementierung, C++ portiert ohne Änderungen)
 
-- Basiskalibrierung, SNR 20 dB, sps 8: 9/9 Fällen korrekt
-  (BPSK, QPSK, FSK2, Chirp, CW, OFDM, QAM16, QAM64, QAM256).
-- SNR 10 dB: 8/9 (QAM256 ist nicht mehr auflösbar; Fallback QAM64,
-  als dokumentierte Grenze auch im C++-Test verifiziert).
-- Oversamplingfaktoren 4/8/16: bestanden (BPSK/QPSK/FSK2-Varianten).
-- Mehrpuls: Sequenz aus drei Pulzen und Überlagerung zweier Pulse in
-  verschiedenen Bändern bestanden.
+Die Referenzimplementierung führt die C++-Pipeline elementweise aus
+(äquivalente Arithmetik) und wurde gegen eine erweiterte Qualitätsmatrix
+aus 168 Szenarien gefahren. Die C++-Testsuite (tests/test_main.cpp,
+94 Szenarien) deckt den verifizierten robusten Bereich ab; jedes Szenario
+der Suite wurde in der Referenz über mindestens drei Seeds bestätigt.
+
+- Basiskalibrierung, SNR 20 dB, sps 8: 9/9 korrekt (BPSK, QPSK, FSK2,
+  Chirp, CW, OFDM, QAM16, QAM64, QAM256).
+- SNR-Raster 30/20/15/12/10/8/6/3/0 dB je Typ:
+  - 15 dB: alle 9 Typen korrekt.
+  - 10 dB: 8/9 (QAM256 fällt auf QAM64, dokumentierte Grenze; FSK2
+    erst ab ~12 dB über alle Seeds stabil).
+  - 6 dB: BPSK/QPSK/QAM16/QAM64/Chirp/CW/OFDM korrekt; darunter
+    zunehmende Fragmentierung des Banddetektors (unterhalb der
+    Spezifikation von 6 dB Mindest-SNR).
+- Oversampling: BPSK/QPSK/QAM16 bei sps 4/8/16/32 bestanden; FSK2 bei
+  sps 4/8 bestanden.
+- Frequenzlagen fc 0.00 bis 0.45 und -0.30 (QPSK, FSK2, Chirp, CW):
+  bestanden.
+- Chirp-Varianten: up/down, Bandbreiten 0.10/0.25/0.40, SNR 20 und
+  10 dB: 12/12 bestanden.
+- Pulslängen: QPSK 150 bis 1000 Symbole (1200 bis 8000 Samples); CW 500
+  bis 8000 Samples: bestanden.
+- Mehrpuls: Sequenz QPSK/FSK2/CW; zwei BPSK hintereinander mit
+  vertauschten Frequenzen; zeitgleich überlagerte Pulse BPSK+QAM16,
+  QPSK+FSK2, CW+QPSK, Chirp+CW, OFDM+QPSK (frequenzgetrennt): bestanden.
+- Seed-Streuung: QPSK bei 10 dB und QAM16 bei 20 dB, je 5 Seeds ohne
+  Ausreißer (Referenz); OFDM (nfft 256, cp 64, 40 Symbole, Last 0.3)
+  bei 10/15/20 dB über 3 Seeds stabil.
+- Härtungsfälle: Nullzeiger, leere und Miniatureingaben, reines Rauschen,
+  Null- und DC-Puffer, vollständig NaN-/Inf-beladene Puffer sowie
+  NaN-/Inf-/Null-Dropouts mitten in einem Puls: definierte Ergebnisse,
+  keine Abstürze, Dropout verhält sich wie Stille (Puls bleibt
+  klassifizierbar).
+
+## Härtung
+
+Eingabesicherung (defense in depth, mehrschichtig):
+- ModulationClassifier::classify: Nullzeiger und Länge 0 liefern leer.
+- Banddetektion/Extraktion: nicht-endliche IQ-Samples werden vor der
+  FFT als Ausfall (Null) behandelt; ein einzelnes NaN vergiftet sonst
+  über die Butterfly-Operation das gesamte Spektrum des Fensters und
+  damit den ganzen Puls. Der Effekt ist identisch zu Null-Dropouts.
+- Der Klassifikations-Crop wird zusätzlich sanitisiert (NaN/Inf -> 0).
+- Median: nicht-endliche Werte werden gefiltert; std::sort mit NaN
+  verletzt die strikte schwache Ordnung und wäre undefiniertes Verhalten
+  bis hin zum Absturz.
+- f_inst-Histogramm: isfinite-Schutz vor der Indexumrechnung.
+- Frühabrutzzweig der Banddetektion (Fenster < 16) füllt die PSD mit
+  -300 dB, damit die SNR-Schätzung nie auf ein leeres PSD stößt
+  (Modulo-Division durch null).
+- estimateSnrFlat: leere PSD oder degenerierte Bandbreite liefern
+  SNR -99 dB, Flachheit 0.
 
 ## Grenzen
 
-- Mindestpuls 400 Samples, Mindest-SNR ~6 dB (Vollauslastung aller Typen
-  ab ~10 dB).
-- QAM256 gegen QAM64 sicher erst ab ~20 dB.
-- OFDM erfordert genug Symbolperioden im Puls (Nutzteil <= n/4).
-- Gleichzeitige Pulse in derselben Frequenzlage sind nicht trennbar.
+- Mindestpuls 400 Samples, Mindest-SNR 6 dB (Vollauslastung aller
+  Typen ab ~12 dB; QAM256 ab ~15-20 dB; FSK2 ab ~12-15 dB stabil).
+- Oversamplingfaktor: sps 4 bis 8 für alle Typen; BPSK/QPSK/QAM bis
+  sps 32. sps 2 erzeugt pulsförmige Breitbandsignale und wird nicht
+  unterstützt; FSK2 zerfällt ab sps 16 in Tonsatelliten.
+- OFDM: zyklisches Präfix muss mindestens 48 Samples lang sein
+  (Kandidaten-Nutzteil beginnt dort); cp 16 ist demnach nicht
+  erkennbar. Traglast 0.3 benötigt mindestens ~40 Symbole (bei 20
+  Symbolen liegt die CP-Autokorrelationsspitze zu nah an der Schwelle);
+  Last 1.0 mit nfft >= 512 füllt das gesamte Nyquist-Band und fällt
+  aus dem Bandmodell.
+- Gleichzeitige Pulse in derselben Frequenzlage sind nicht trennbar;
+  frequenzgetrennte Überlagerungen benötigen einen Mittenabstand von
+  grob 0.10 oder mehr (halbierende Bandbreiten dürfen sich nicht
+  überlappen).
+- Die Mindeststatistik der Pulssegmentierung benötigt mindestens eine
+  ruhige Teilphase im Puffer: ein durchgehendes Signal ohne jede
+  Schweigephase liefert keinen Rauschboden und damit keinen Puls.
 - Symbolraten außerhalb 1.6..n/12 Samples/Symbol werden nicht verfolgt.
