@@ -34,6 +34,14 @@ std::vector<cd> genChirp(std::size_t nsamp, double bw, bool up = true);
 // Unmodulierter Traeger (CW) mit Zufallsphase.
 std::vector<cd> genCw(std::mt19937& rng, std::size_t nsamp);
 
+// Amplitudenschwankende Variante eines Pulses (Huellkurve multipliziert,
+// anschliessend auf mittlere Leistung 1 normiert):
+//   mode 0: Zufallsamplitude pro Sample in [1-depth, 1] (depth z. B. 0.7)
+//   mode 1: langsamer Sinus-Fade zwischen 1-depth und 1
+//   mode 2: Gauss'scher Einbruch in der Pulsmitte um den Faktor (1-depth)
+std::vector<cd> applyEnv(const std::vector<cd>& sig, int mode, double depth,
+                         std::mt19937& rng);
+
 // OFDM: nfft Nutztraeger, cp Samples zyklisches Praefix, nsym Symbole,
 // load Anteil belegter Traeger (symmetrisch um DC, QPSK-Beladung).
 std::vector<cd> genOfdm(std::mt19937& rng, int nfft, int cp, int nsym,

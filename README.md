@@ -25,11 +25,15 @@ klassifiziert die Modulationsart jedes Pulses in zwei Stufen:
   Basisband-Slice direkt aus dem IQ-Puffer (Wiederfinden im Signal).
 - Klassenkapselung: eine Fassade (`ModulationClassifier`), alle
   Schwellwerte konfigurierbar (`ClassifierConfig`).
-- Deterministische Testsuite ohne externes Testframework: 100 Szenarien
+- Deterministische Testsuite ohne externes Testframework: 106 Szenarien
   aus der Qualitaetsmatrix (SNR-Raster, Oversampling, Frequenzlagen,
   Chirp-Varianten, Pulslaengen, Mehrpuls, Seed-Streuung) plus
   Haertungsfaelle (Nullzeiger, leere und NaN-beladene Eingaben,
   Dropouts im Puls).
+- Robust gegen Amplitudenschwankungen (Fading): Ein Puls mit schwankender
+  Amplitude bleibt durch Fade-Merge ein Puls (solange der Einbruch nicht
+  bis auf den Rauschboden faellt), inkl. korrekter Klassifikation und
+  Lokalisierung.
 - Haertung der Eingabepfade: NaN/Inf-Samples verhalten sich wie
   Schweigephasen und vergiften weder FFT-Fenster noch Statistiken
   (siehe docs/METHODOLOGY.md).
@@ -72,6 +76,27 @@ Einbindung in ein qmake-Konsumentenprojekt:
 
 Alle Frequenzen sind auf die Abtastrate normiert (fs = 1).
 
+## Bilder
+
+![Pipeline-Blockschaltbild](docs/images/pipeline.png)
+
+![Detektion und Lokalisierung](docs/images/detection.png)
+
+Zeit-Huellkurve und Detektionsspektrum eines Demo-Puffers (QPSK + CW + FSK2
+bei 20 dB SNR) mit den lokalisierten Pulsen: feine Zeitfenster (gelb),
+detektierte Baender (blau) und Sub-Bin-Mittenfrequenzen (farbige Linien).
+
+![Spektrogramm mit lokalisierten Pulsen](docs/images/spectrogram.png)
+
+Spektrogramm desselben Puffers mit den Puls-Rechtecken (Zeit x Frequenz) aus
+den Klassifikationsergebnissen.
+
+Die Bilder werden deterministisch aus einem Demo-Puffer und den echten
+Klassifikationsergebnissen erzeugt (aus dem Repo-Root):
+
+    cmake --build build --target iqclassify_readme_images
+    ./build/iqclassify_readme_images docs/images
+
 ## Dokumentation
 
 - `docs/REQUIREMENTS.md` Anforderungen und Leistungsumfang
@@ -83,8 +108,9 @@ Alle Frequenzen sind auf die Abtastrate normiert (fs = 1).
     include/iqclassify/   oeffentliche Header (Schirmheader: iqclassify.hpp)
     src/                  Implementierung
     tests/                 Testsuite (Signalgeneratoren, Szenarien)
+    tools/                 Bildgenerator fuer die README-Bilder (docs/images/)
     third_party/pocketfft/ vendorte FFT (BSD-3-Klausel, Max-Planck-Gesellschaft)
-    docs/                  Anforderungs-, Methodik- und API-Dokumentation
+    docs/                  Doku (Anforderung, Methodik, API) und Bilder (images/)
 
 ## Lizenz
 

@@ -19,6 +19,8 @@
 //  12. Lokalisierung: samplegenaue Zeitlage + Sub-Bin-Frequenz der
 //      detektierten Pulse (QPSK/CW/Chirp/FSK2/OFDM, 2-Puls-Szene) und
 //      extractPulse/extractPulseF (Wiederfinden im IQ-Puffer)
+//  13. Amplitudenschwankende Pulse: Fade-Merge (ein Puls bleibt ein Puls),
+//      korrekte Klassifikation und Lokalisierung trotz schwankender Amplitude
 //
 // Ein Szenario besteht genau dann den Test, wenn die sortierte Labelmenge
 // der erkannten Pulse der erwarteten entspricht. Fuer
@@ -710,6 +712,76 @@ int main() {
                         res.size());
             for (const auto& r : res) printPulse(r);
         }
+    }
+    // 13. Amplitudenschwankende Pulse (Fading): ein Puls mit schwankender
+    //     Amplitude darf nicht in mehrere Pulse zerlegt werden (Fade-Merge)
+    //     und muss korrekt klassifiziert/lokaliert bleiben.
+    {
+        std::mt19937 rng(600);
+        iqtest::Recorder rec;
+        rec.silence(2000);
+        rec.add(iqtest::applyEnv(iqtest::genPsk(rng, 4, 400, 8), 0, 0.7,
+                                 rng),
+                0.15, 20.0);
+        rec.silence(2000);
+        scenarioLocate("fade-qpsk-rand", rec.buffer(), "QPSK", 0.15, 2000,
+                       3200);
+    }
+    {
+        std::mt19937 rng(601);
+        iqtest::Recorder rec;
+        rec.silence(2000);
+        rec.add(iqtest::applyEnv(iqtest::genPsk(rng, 4, 400, 8), 2, 0.7,
+                                 rng),
+                -0.10, 20.0);
+        rec.silence(2000);
+        scenarioLocate("fade-qpsk-mid", rec.buffer(), "QPSK", -0.10, 2000,
+                       3200);
+    }
+    {
+        // tiefe Mitten-Fade (-20 dB) bei hohem SNR: Luecke bleibt ueber dem
+        // Rauschboden -> Fade-Merge liefert genau einen Puls.
+        std::mt19937 rng(602);
+        iqtest::Recorder rec;
+        rec.silence(2000);
+        rec.add(iqtest::applyEnv(iqtest::genCw(rng, 3000), 2, 0.9, rng),
+                -0.20, 40.0);
+        rec.silence(2000);
+        scenarioLocate("fade-cw-deep-40dB", rec.buffer(), "Unmodulated",
+                       -0.20, 2000, 3000);
+    }
+    {
+        std::mt19937 rng(603);
+        iqtest::Recorder rec;
+        rec.silence(2000);
+        rec.add(iqtest::applyEnv(iqtest::genCw(rng, 3000), 1, 0.5, rng),
+                0.20, 20.0);
+        rec.silence(2000);
+        scenarioLocate("fade-cw-sinus6dB", rec.buffer(), "Unmodulated",
+                       0.20, 2000, 3000);
+    }
+    {
+        // FSK2 mit langsamer 6-dB-Amplitudenschwankung (Sinus): die beiden
+        // Tonscheiben bleiben als ein Band erkennbar.
+        std::mt19937 rng(604);
+        iqtest::Recorder rec;
+        rec.silence(2000);
+        rec.add(iqtest::applyEnv(iqtest::genFsk2(rng, 400, 8), 1, 0.5, rng),
+                0.05, 20.0);
+        rec.silence(2000);
+        scenario("fade-fsk2-sinus", rec.buffer(), "FSK2");
+    }
+    {
+        // Rampe (leiser Anfang ist am Detektionslimit): Puls wird als
+        // genau ein Puls erkannt und korrekt klassifiziert.
+        std::mt19937 rng(605);
+        iqtest::Recorder rec;
+        rec.silence(2000);
+        rec.add(iqtest::applyEnv(iqtest::genPsk(rng, 2, 400, 8), 1, 0.8,
+                                 rng),
+                0.10, 20.0);
+        rec.silence(2000);
+        scenario("fade-bpsk-ramp", rec.buffer(), "BPSK");
     }
     std::printf("\nscore: %d/%d\n", g_ok, g_total);
     std::printf("%s\n", g_ok == g_total ? "ALL TESTS PASSED"
