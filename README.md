@@ -103,6 +103,33 @@ Alle Frequenzen sind auf die Abtastrate normiert (fs = 1). Alle Ergebnisse
 das Originalsignal — Zeit in Samples des Originalpuffers, Frequenzen zyklisch
 in [0,1) der Originalabtastrate.
 
+### Sehr kurze Pulse (~180 Samples, z. B. 13 BPSK-Bit bei sps=8)
+
+Kurze Puffer werden automatisch erkannt: Ist der extrahierte Basisband-Slice
+kuerzer als 1024 Samples, wird er vor der Analyse per Anti-Image-Tiefpass
+interpolierend hochgesamplelt (`ClassifierConfig::upsample`, 0 = automatisch
+`U = clamp(ceil(1024/len), 1, 8)`, 1 = aus, >1 = fester Faktor). Das
+Upsampling sitzt bewusst auf dem Slice und nicht am Puffer-Eingang: Dort
+ist der Anti-Image-Filter unkritisch (der Slice ist schmalbandig) und die
+Banddetektion bleibt in der Originalrate. Zeiten der Ergebnisse werden auf
+das Original zurueckgerechnet, Frequenzen bleiben in der Originalrate.
+Zusaetzlich stellt `ClassifierConfig::shortPulseProfile()` feinere
+Segmentierung, kleinere Mindestpulslaenge (`minPulseLen=96`) und eine
+niedrigere Symbolschwelle (`timingMinSyms=8`) bereit. Der Rauschboden bei
+wenigen Bloecken wird per 10%-Perzentil geschaetzt.
+
+    iqclassify::ClassifierConfig cfg =
+        iqclassify::ClassifierConfig::shortPulseProfile();
+    iqclassify::ModulationClassifier clf(cfg);
+    auto pulses = clf.classify(iq.data(), iq.size());
+    // 180-Sample-Puffer mit BPSK 13 Bit @ fc=0.13, 20 dB SNR:
+    // 1 Puls, centerFreqRefined = 0.130 (10/10 Seeds, siehe Test 20)
+
+Das Default-Profil bleibt auf laengere Pulse kalibriert (`minPulseLen=400`
+— ein 180-Sample-Puffer liefert dort definiert 0 Pulse). Bei nur ~13
+Symbolen ist die Feinklassifikation (BPSK/QPSK/QAM-Nachbarn) grenzwertig;
+Detektion, Zeitlage und Frequenz sind jedoch zuverlaessig.
+
 ## Performance
 
 Benchmark-Tool (Puffer von 10k bis 2M Samples):

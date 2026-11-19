@@ -35,6 +35,10 @@
 //      vom Puls ausgefuellt (dokumentierte Segmenter-Grenze: 0 Pulse)
 //  19. Parallelverarbeitung: threads=1 vs. threads=4 liefern identische
 //      Ergebnisse (kanalisierte Pipeline + Channelizer)
+//  20. Sehr kurze Pulse (~180 Samples, 13 BPSK-Bit bei sps=8): Detektion und
+//      Lokalisierung via automatischem Slice-Upsampling (cfg.upsample) +
+//      shortPulseProfile; Rauschboden bei wenigen Bloecken per Perzentil;
+//      CW/FSK2/QPSK ebenso; Default-Profil erwartet laengere Pulse (0 Pulse)
 //
 // Ein Szenario besteht genau dann den Test, wenn die sortierte Labelmenge
 // der erkannten Pulse der erwarteten entspricht. Fuer
@@ -1561,6 +1565,136 @@ int main() {
             } else {
                 std::printf("[FAIL] %-24s n1=%zu n4=%zu\n", "par-channelize",
                             a.size(), b.size());
+            }
+        }
+    }
+    // 20. Sehr kurze Pulse (~180-Sample-Puffer, 13 BPSK-Bit bei sps=8):
+    //     automatisches Upsampling des Basisband-Slices + shortPulseProfile.
+    //     Default-Profil bleibt auf laengere Pulse kalibriert (0 Pulse).
+    {
+        // kind: 0 = PSK(m), 1 = FSK2, 2 = CW
+        auto checkShort = [&](const char* name, int seed, int kind, int m,
+                              const char* expectMod, double fcTrue) {  // expectMod may be nullptr
+            ++g_total;
+            std::mt19937 rng(seed);
+            iqtest::Recorder rec;
+            rec.silence(20);
+            if (kind == 2) {
+                rec.add(iqtest::genCw(rng, 120), fcTrue, 20.0);
+            } else if (kind == 1) {
+                rec.add(iqtest::genFsk2(rng, 13, 8), fcTrue, 20.0);
+            } else {
+                rec.add(iqtest::genPsk(rng, m, 13, 8), fcTrue, 20.0);
+            }
+            rec.silence(24);
+            const auto& buf = rec.buffer();
+            iqclassify::ClassifierConfig cfg =
+                iqclassify::ClassifierConfig::shortPulseProfile();
+            iqclassify::ModulationClassifier clf(cfg);
+            const auto res = clf.classify(buf.data(), buf.size());
+            // Default-Profil: minPulseLen=400 -> kurzer Puls wird nicht erwartet
+            iqclassify::ModulationClassifier clfDef{iqclassify::ClassifierConfig()};
+            const auto resDef =
+                clfDef.classify(buf.data(), buf.size());
+            const double fcExp = fcTrue;
+            bool ok = res.size() == 1 && resDef.empty();
+            if (ok) {
+                const auto& r = res[0];
+                // expectMod == nullptr: nur Detektion + Frequenzlage pruefen
+                // (bei 13 Symbolen ist die Feinklasse PSK/QAM-Nachbarn).
+                ok = (expectMod == nullptr ||
+                      std::string(iqclassify::toString(r.modulation)) ==
+                          expectMod) &&
+                     cycDist(r.centerFreqRefined, fcExp) < 0.02 &&
+                     r.startSampleFine < 156 &&
+                     r.startSampleFine + r.numSamplesFine > 20;
+            }
+            if (ok) {
+                ++g_ok;
+                std::printf("[OK ] %-24s n=%zu -> %s fc=%.4f @%zu+%zu\n", name,
+                            buf.size(),
+                            iqclassify::toString(res[0].modulation),
+                            res[0].centerFreqRefined, res[0].startSampleFine,
+                            res[0].numSamplesFine);
+            } else {
+                std::printf("[FAIL] %-24s n=%zu nRes=%zu nDef=%zu", name,
+                            buf.size(), res.size(), resDef.size());
+                for (const auto& r : res)
+                    std::printf(" %s(fc=%.4f @%zu+%zu)",
+                                iqclassify::toString(r.modulation),
+                                r.centerFreqRefined, r.startSampleFine,
+                                r.numSamplesFine);
+                std::printf("\n");
+            }
+        };
+        // BPSK 13 Bit: Detektion + Frequenzlage; die Feinklassifikation bei
+        // nur 13 Symbolen ist grenzwertig (PSK/QAM-Nachbarn), daher wird nur
+        // die Detektion und Lokalisierung hart geprueft.
+        ++g_total;
+        {
+            bool allDetected = true;
+            double fcErr = 0.0;
+            for (int seed : {123, 7, 42}) {
+                std::mt19937 rng(seed);
+                iqtest::Recorder rec;
+                rec.silence(20);
+                rec.add(iqtest::genPsk(rng, 2, 13, 8), 0.13, 20.0);
+                rec.silence(24);
+                iqclassify::ClassifierConfig cfg =
+                    iqclassify::ClassifierConfig::shortPulseProfile();
+                iqclassify::ModulationClassifier clf(cfg);
+                const auto res = clf.classify(rec.buffer().data(),
+                                             rec.buffer().size());
+                if (res.size() != 1) {
+                    allDetected = false;
+                    break;
+                }
+                fcErr = std::max(fcErr, cycDist(res[0].centerFreqRefined, 0.13));
+                if (res[0].startSampleFine >= 156 ||
+                    res[0].startSampleFine + res[0].numSamplesFine <= 20)
+                    allDetected = false;
+            }
+            if (allDetected && fcErr < 0.02) {
+                ++g_ok;
+                std::printf("[OK ] %-24s 3 Seeds -> 1 Puls, fc=0.13+-%.4f\n",
+                            "short-bpsk13", fcErr);
+            } else {
+                std::printf("[FAIL] %-24s detected=%d fcErr=%.4f\n",
+                            "short-bpsk13", (int)allDetected, fcErr);
+            }
+        }
+        checkShort("short-qpsk13", 5, 0, 4, nullptr, -0.10);
+        // FSK2-Generator erzeugt zwei feste Frequenzen um fc; die
+        // Mittenfrequenz liegt bei fc (Hub symmetrisch um fc).
+        checkShort("short-fsk2-13", 6, 1, 0, "FSK2", 0.20);
+        checkShort("short-cw120", 7, 2, 0, "Unmodulated", 0.30);
+        // Upsampling explizit aus: Slice bleibt kurz, Detektion klappt ueber
+        // das Profil, aber die Symbolanalyse hat weniger Samples zur Verfuegung.
+        ++g_total;
+        {
+            std::mt19937 rng(123);
+            iqtest::Recorder rec;
+            rec.silence(20);
+            rec.add(iqtest::genPsk(rng, 2, 13, 8), 0.13, 20.0);
+            rec.silence(24);
+            iqclassify::ClassifierConfig cfg =
+                iqclassify::ClassifierConfig::shortPulseProfile();
+            cfg.upsample = 1;
+            iqclassify::ModulationClassifier clf(cfg);
+            const auto res = clf.classify(rec.buffer().data(),
+                                         rec.buffer().size());
+            const bool ok = res.size() == 1 &&
+                            cycDist(res[0].centerFreqRefined, 0.13) < 0.02;
+            if (ok) {
+                ++g_ok;
+                std::printf("[OK ] %-24s upsample=1 -> %s fc=%.4f @%zu+%zu\n",
+                            "short-noupsample",
+                            iqclassify::toString(res[0].modulation),
+                            res[0].centerFreqRefined, res[0].startSampleFine,
+                            res[0].numSamplesFine);
+            } else {
+                std::printf("[FAIL] %-24s nRes=%zu\n", "short-noupsample",
+                            res.size());
             }
         }
     }

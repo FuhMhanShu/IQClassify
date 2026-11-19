@@ -83,7 +83,18 @@ BandExtractor::BandDetection BandExtractor::bands(const std::complex<double>* x,
     for (std::size_t k = 0; k < nft; ++k) det.psdDb[k] = detail::db10(psd[k]);
     const std::vector<double>& psdDb = det.psdDb;
 
-    const double floorDb = detail::medianOf(psdDb);
+    // Rauschboden der Detektion: Median des PSD, mindestens aber der aus dem
+    // globalen Pufferboden (floorRef, Leistung pro Sample) erwartete
+    // Rausch-Bin-Pegel (Hann-ENBW 3/8 * wlen). Nach einem Upsampling am
+    // Eingang liegt der Grossteil der Bins im vom Anti-Image-Filter geleerten
+    // Spiegelfeld; der reine Median kollabiert dort und die Baender wuerden
+    // explodieren.
+    double floorDb = detail::medianOf(psdDb);
+    if (floorRef > 0.0) {
+        const double nbDb =
+            detail::db10(floorRef * 0.375 * static_cast<double>(wlen));
+        if (nbDb > floorDb) floorDb = nbDb;
+    }
     const double thr = floorDb + cfg.bandGuardDb;
     // stillstes Bin (Start der zyklischen Koordinaten)
     std::size_t qb = 0;

@@ -145,4 +145,43 @@ std::vector<std::complex<double>> Channelizer::resample(
     return out;
 }
 
+std::vector<std::complex<double>> Channelizer::upsample(
+    const std::vector<std::complex<double>>& y, std::size_t U) {
+    if (U <= 1 || y.size() < 2) return y;
+    const std::size_t n = y.size();
+    // Anti-Image-Tiefpass: Hann-gefensterte Sinc, Grenzfrequenz 0.45/U auf
+    // die Ausgaberate normiert, ungerade symmetrische Laenge (zero delay),
+    // auf Verstaerkung U normiert (DC-Gain).
+    const std::size_t taps = 8 * U + 1;
+    const std::size_t M = taps / 2;
+    const double fc = 0.45 / static_cast<double>(U);
+    std::vector<double> h(taps);
+    double sum = 0.0;
+    for (std::size_t i = 0; i < taps; ++i) {
+        const double t = static_cast<double>(i) - static_cast<double>(M);
+        const double si = t == 0.0 ? 2.0 * fc
+                                   : std::sin(2.0 * kPi * fc * t) / (kPi * t);
+        const double w =
+            0.5 - 0.5 * std::cos(2.0 * kPi * static_cast<double>(i) /
+                                 static_cast<double>(taps - 1));
+        h[i] = si * w;
+        sum += h[i];
+    }
+    if (sum != 0.0)
+        for (double& v : h) v *= static_cast<double>(U) / sum;
+    // Zero-Stuffing + Faltung: out[k*U + i - M] += h[i] * y[k]
+    std::vector<std::complex<double>> out(n * U, std::complex<double>(0.0, 0.0));
+    for (std::size_t k = 0; k < n; ++k) {
+        const std::complex<double> v = y[k];
+        if (v == std::complex<double>(0.0, 0.0)) continue;
+        const long base = static_cast<long>(k * U) - static_cast<long>(M);
+        for (std::size_t i = 0; i < taps; ++i) {
+            const long idx = base + static_cast<long>(i);
+            if (idx >= 0 && idx < static_cast<long>(out.size()))
+                out[static_cast<std::size_t>(idx)] += h[i] * v;
+        }
+    }
+    return out;
+}
+
 }  // namespace iqclassify

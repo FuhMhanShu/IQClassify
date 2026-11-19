@@ -7,6 +7,7 @@
 
 #include "iqclassify/Classifier.hpp"
 
+
 #include <atomic>
 #include <thread>
 #include "iqclassify/PulseSegmenter.hpp"
@@ -66,6 +67,35 @@ double wrap01(double f) {
     return f;
 }
 
+// Skaliert die sample-basierten Schwellwerte fuer ein um U hochgesampletes
+// Signal (Folgestufen sehen die Rate U); symbol- und bin-relative Groessen
+// bleiben unveraendert (Bin-Schwellen skalieren mit nft automatisch).
+ClassifierConfig scaleForUpsample(const ClassifierConfig& c, std::size_t U) {
+    if (U <= 1) return c;
+    ClassifierConfig r = c;
+    const auto m = [U](std::size_t v) { return v * U; };
+    const auto ml = [U](long v) { return v * static_cast<long>(U); };
+    // Sample-basierte Groessen skalieren mit U. segFloorGroup zaehlt Bloecke
+    // (n/segWin ist rateninvariant) und bleibt unveraendert; ebenso Symbol-
+    // und Histogramm-Anzahlen.
+    r.segWin = m(c.segWin);
+    r.segMargin = m(c.segMargin);
+    r.minPulseLen = m(c.minPulseLen);
+    r.minAnalyzeLen = m(c.minAnalyzeLen);
+    r.detectWin = m(c.detectWin);
+    // Bin-basierte Groessen skalieren mit U (nft waechst mit detectWin).
+    r.tBwCwBins = m(c.tBwCwBins);
+    r.ofdmMinBandBins = m(c.ofdmMinBandBins);
+    r.satMergeMin = ml(c.satMergeMin);
+    r.ofdmTauMin = ml(c.ofdmTauMin);
+    r.ofdmTauMax = ml(c.ofdmTauMax);
+    r.tCpMinTau = ml(c.tCpMinTau);
+    r.cpCleanWin = ml(c.cpCleanWin);
+    r.cpHalfTol = ml(c.cpHalfTol);
+    r.cpIsolation = ml(c.cpIsolation);
+    return r;
+}
+
 // Skaliert die sample-basierten Schwellwerte fuer einen um D dezimierten
 // Kanal (die Folgestufen sehen den Kanal mit Rate 1/D); symbol- und
 // verhaeltnisbasierte Groessen bleiben unveraendert.
@@ -81,8 +111,8 @@ ClassifierConfig scaleForDecimation(const ClassifierConfig& c,
         const long q = v / static_cast<long>(D);
         return q > 0 ? q : 1;
     };
+    // segFloorGroup zaehlt Bloecke (n/segWin ist rateninvariant) -> unveraendert.
     r.segWin = sd(c.segWin);
-    r.segFloorGroup = sd(c.segFloorGroup);
     r.segMargin = sd(c.segMargin);
     r.minPulseLen = sd(c.minPulseLen);
     r.detectWin = sd(c.detectWin);
@@ -113,7 +143,7 @@ CpEvidence cpAutocorrPeak(const std::vector<cd>& y,
                           const ClassifierConfig& cfg) {
     const std::size_t n = y.size();
     CpEvidence e;
-    if (n < 256) return e;
+    if (n < cfg.minAnalyzeLen) return e;
     const std::size_t nft = detail::protoPad(n);
     std::vector<cd> buf = y;
     buf.resize(nft, cd(0.0, 0.0));
@@ -195,7 +225,7 @@ bool cpHalfConsistency(const std::vector<cd>& y, const ClassifierConfig& cfg,
         const std::size_t lo = h == 0 ? 0 : n / 2;
         const std::size_t hi = h == 0 ? n / 2 : n;
         const std::size_t m = hi - lo;
-        if (m < 256) return false;
+        if (m < cfg.minAnalyzeLen) return false;
         const std::size_t nft = detail::protoPad(m);
         std::vector<cd> buf(y.begin() + static_cast<std::ptrdiff_t>(lo),
                             y.begin() + static_cast<std::ptrdiff_t>(hi));
@@ -237,8 +267,13 @@ bool cpHalfConsistency(const std::vector<cd>& y, const ClassifierConfig& cfg,
 // Symboltiming
 // --------------------------------------------------------------------------
 std::pair<double, double> rsFromCyclic(const std::vector<double>& env2,
-                                       std::size_t n, double bw) {
-    const std::size_t nft = detail::pow2ceil(2 * n);
+                                       std::size_t n, double bw,
+                                       std::size_t nftOverride = 0,
+                                       double bwDivLo = 1.5,
+                                       double bwDivHi = 1.05,
+                                       double promGate = 0.0) {
+    const std::size_t nft =
+        nftOverride > 0 ? nftOverride : detail::pow2ceil(2 * n);
     double mean = 0.0;
     for (double v : env2) mean += v;
     mean /= static_cast<double>(n);
@@ -251,28 +286,92 @@ std::pair<double, double> rsFromCyclic(const std::vector<double>& env2,
     const std::vector<cd> tsig = buf;
     detail::fftInPlace(buf, false);
     const long kLo = std::max(1L, static_cast<long>(
-                                     std::floor(bw / 1.50 *
+                                     std::floor(bw / bwDivLo *
                                                 static_cast<double>(nft))));
     const long kHi = std::min<long>(
         static_cast<long>(nft / 4),
-        static_cast<long>(std::ceil(bw / 1.05 * static_cast<double>(nft))));
+        static_cast<long>(std::ceil(bw / bwDivHi * static_cast<double>(nft))));
     if (kHi <= kLo + 2) return {0.0, 0.0};
-    std::vector<double> mags;
-    mags.reserve(static_cast<std::size_t>(kHi - kLo));
-    long bestK = 0;
-    double bestV = -1.0;
-    for (long k = kLo; k < kHi; ++k) {
+    // Betragsquadrate ueber einen gegenueber dem Suchbereich erweiterten
+    // K-Bereich; die Nachbarschafts-Median der Linien-Auswahl braucht auch
+    // am Rand des Suchbereichs echte Nachbarn.
+    const long kLoW = kLo / 2 > 1 ? kLo / 2 : 1;
+    const long kHiW = std::min<long>(static_cast<long>(nft / 4),
+                                     kHi + (kHi - kLo) / 2);
+    std::vector<double> magsW;
+    magsW.reserve(static_cast<std::size_t>(kHiW - kLoW));
+    for (long k = kLoW; k < kHiW; ++k) {
         const cd& f = buf[static_cast<std::size_t>(k)];
-        const double v = f.real() * f.real() + f.imag() * f.imag();
-        mags.push_back(v);
-        if (v > bestV) {
-            bestV = v;
-            bestK = k;
-        }
+        magsW.push_back(f.real() * f.real() + f.imag() * f.imag());
     }
+    const auto magW = [&](long k) -> double {
+        return magsW[static_cast<std::size_t>(k - kLoW)];
+    };
+    std::vector<double> mags(magsW.begin() +
+                                 static_cast<std::ptrdiff_t>(kLo - kLoW),
+                             magsW.begin() +
+                                 static_cast<std::ptrdiff_t>(kHi - kLoW));
     std::sort(mags.begin(), mags.end());
     const double med = !mags.empty() ? mags[mags.size() / 2] : 0.0;
-    const double prom = bestV / std::max(med, 1e-30);
+    // Linien-Auswahl: Bei kurzen Pulsen (wenige Symbole) liegt unter der
+    // Symbolratenlinie ein breiter Buckel der Pulsflanken; die eigentliche
+    // Ratenlinie ist dagegen schmal (1-2 Bins). Ist ein Prominenz-Gate
+    // gesetzt, wird unter den Kandidaten oberhalb des Gates die schmalste
+    // Linie (Staerke zur lokalen Nachbarschafts-Median) gewaehlt, nicht der
+    // Buckel. Ohne Gate bleibt es beim reinen Maximum.
+    const long win = (kHi - kLo) / 6 > 4 ? (kHi - kLo) / 6 : 4;
+    long bestK = 0;
+    double bestV = -1.0;
+    double bestProm = -1.0;
+    {
+        long maxK = 0;
+        double maxV = -1.0;
+        for (long k = kLo; k < kHi; ++k) {
+            const double v = magW(k);
+            if (v > maxV) {
+                maxV = v;
+                maxK = k;
+            }
+        }
+        bestK = maxK;
+        bestV = maxV;
+        bestProm = maxV / std::max(med, 1e-30);
+    }
+    if (promGate > 0.0 && med > 0.0 && bestK > kLo && bestK < kHi - 1) {
+        // Tie-Breaker: Das reine Maximum kann bei kurzen Pulsen auf dem
+        // breiten Flanken-Buckel liegen (wenige Symbole -> schwache Linie).
+        // Gibt es ein deutlich schaerferes lokales Maximum (lokale Prominenz
+        // >= Gate und >= 3x die des Maximums), wird auf dieses gewechselt.
+        auto localScore = [&](long k) {
+            std::vector<double> nb;
+            nb.reserve(static_cast<std::size_t>(2 * win));
+            for (long j = k - win; j <= k + win; ++j) {
+                if (std::abs(j - k) <= 1) continue;
+                nb.push_back(magW(j));
+            }
+            if (nb.empty()) return 0.0;
+            std::sort(nb.begin(), nb.end());
+            return magW(k) / std::max(nb[nb.size() / 2], 1e-30);
+        };
+        const double s0 = localScore(bestK);
+        double s1 = -1.0;
+        long k1 = bestK;
+        for (long k = kLo + 1; k < kHi - 1; ++k) {
+            const double v = magW(k);
+            if (v <= magW(k - 1) || v <= magW(k + 1)) continue;
+            const double sc = localScore(k);
+            if (sc >= promGate && sc > s1) {
+                s1 = sc;
+                k1 = k;
+            }
+        }
+        if (s1 >= 3.0 * s0) {
+            bestK = k1;
+            bestV = magW(k1);
+            bestProm = s1;
+        }
+    }
+    const double prom = bestProm > 0.0 ? bestProm : bestV / std::max(med, 1e-30);
     if (bestK <= 0 || bestK >= static_cast<long>(nft) - 1)
         return {0.0, prom};
     // parabolische Peakinterpolation
@@ -309,12 +408,18 @@ std::pair<double, double> rsFromCyclic(const std::vector<double>& env2,
         }
         return std::abs(acc);
     };
-    double d = 3.0 / static_cast<double>(nft);
-    while (d > 1e-7) {
-        const double flo = fr - d;
-        const double fhi = fr + d;
-        fr = coh(flo) > coh(fhi) ? flo : fhi;
-        d *= 0.5;
+    {
+        const double fr0 = fr;
+        const double lim = 1.5 / static_cast<double>(nft);
+        double d = 3.0 / static_cast<double>(nft);
+        while (d > 1e-7) {
+            const double flo = fr - d;
+            const double fhi = fr + d;
+            fr = coh(flo) > coh(fhi) ? flo : fhi;
+            if (fr < fr0 - lim) fr = fr0 - lim;
+            if (fr > fr0 + lim) fr = fr0 + lim;
+            d *= 0.5;
+        }
     }
     return {fr, prom};
 }
@@ -362,24 +467,45 @@ double eyeOffset(const std::vector<double>& env, std::size_t n, double sps) {
 std::vector<std::size_t> estimateSymbolsRobust(const Features& f,
                                                 const ClassifierConfig& cfg) {
     const std::size_t n = f.n;
-    if (n < 256) return {};
+    if (n < cfg.minAnalyzeLen) return {};
     std::vector<double> env2(n);
     for (std::size_t i = 0; i < n; ++i) env2[i] = f.env[i] * f.env[i];
-    const auto rp = rsFromCyclic(env2, n, f.bw);
+    // Kurzpulse (< minAnalyzeLen): feineres Zero-Padding fuer eine scharfere
+    // Ratenlinie (wenige Symbole -> grobes K-Raster sonst).
+    const std::size_t nftOv =
+        cfg.minAnalyzeLen < 256 && n < 512 ? detail::pow2ceil(8 * n) : 0;
+    const auto rp = rsFromCyclic(env2, n, f.bw, nftOv, cfg.rsBwDivLo,
+                                 cfg.rsBwDivHi, cfg.tRsProm);
     if (rp.first <= 0.0 || rp.second < cfg.tRsProm) return {};
-    const double sps = 1.0 / rp.first;
     const double spsMax =
         std::max(2.0, static_cast<double>(n) / 12.0);
-    if (sps < 1.6 || sps > spsMax) return {};
-    const double off = eyeOffset(f.env, n, sps);
+    double sps = 1.0 / rp.first;
     std::vector<std::size_t> pos;
-    long k = 0;
-    while (off + static_cast<double>(k) * sps <
-           static_cast<double>(n) - 2.0) {
-        const double p = off + static_cast<double>(k) * sps;
-        const long ip = std::lround(p);
-        if (ip >= 1) pos.push_back(static_cast<std::size_t>(ip));
-        ++k;
+    const auto grid = [&](double s) {
+        std::vector<std::size_t> p;
+        const double o = eyeOffset(f.env, n, s);
+        long k = 0;
+        while (o + static_cast<double>(k) * s <
+               static_cast<double>(n) - 2.0) {
+            const long ip = std::lround(o + static_cast<double>(k) * s);
+            if (ip >= 1) p.push_back(static_cast<std::size_t>(ip));
+            ++k;
+        }
+        return p;
+    };
+    if (sps >= 1.6 && sps <= spsMax) pos = grid(sps);
+    if (pos.size() < cfg.timingMinSyms && f.bw > 0.0) {
+        // Fallback fuer sehr kurze Pulse (wenige Symbole): die zyklische
+        // Linie ist dann im breiten Flanken-Buckel vergraben. Die Bandbreite
+        // eines PSK-Pulses ist ~1.2-1.5x die Symbolrate -> sps ~ 1.25/bw.
+        const double spsNom = 1.25 / f.bw;
+        if (spsNom >= 1.6 && spsNom <= spsMax) {
+            auto pos2 = grid(spsNom);
+            if (pos2.size() > pos.size()) {
+                sps = spsNom;
+                pos = std::move(pos2);
+            }
+        }
     }
     if (pos.size() < cfg.timingMinSyms) return {};
     return pos;
@@ -422,7 +548,9 @@ double snrCorrectK42(double k42Obs, double snrDb) {
 
 std::pair<double, double> carrierFromSymbols(const std::vector<cd>& s) {
     const std::size_t len = s.size();
-    if (len < 16) return {0.0, 1.0};
+    // Auch kurze Pulse (ab 8 Symbolen) bekommen eine Traeger-Schaetzung;
+    // ohne sie bleibt ein Resttraeger und die Phasenfaltung kollabiert.
+    if (len < 8) return {0.0, 1.0};
     std::vector<cd> z4(len);
     for (std::size_t i = 0; i < len; ++i) {
         const cd s2 = s[i] * s[i];
@@ -643,7 +771,7 @@ std::pair<ModulationType, double> classifyPhase(const Features& f,
                                                 const ClassifierConfig& cfg,
                                                 const std::vector<cd>& y) {
     // OFDM via zyklischem Praefix (starke, orthogonale Evidenz)
-    if (y.size() >= 256 && f.bandBins > cfg.ofdmMinBandBins) {
+    if (y.size() >= cfg.minAnalyzeLen && f.bandBins > cfg.ofdmMinBandBins) {
         const CpEvidence e = cpAutocorrPeak(y, cfg);
         if (e.rho > cfg.tCpPeak && e.tau >= cfg.tCpMinTau &&
             e.contrast > cfg.tCpContrast && e.clean >= cfg.tCpClean) {
@@ -859,8 +987,14 @@ void sanitizeSlice(std::vector<cd>& y) {
 // --------------------------------------------------------------------------
 std::vector<PulseResult> ModulationClassifier::classify(
     const std::complex<double>* iq, std::size_t n) const {
+    // Haertung: leere Eingabe und Nullzeiger sind definiert leer.
+    if (iq == nullptr || n == 0) return {};
     // Erster Pipelineschritt: spektrale Kanalisierung (Kanaele um die
     // detektierten Energiebereiche), sofern in der Konfiguration aktiv.
+    // Das Upsampling fuer sehr kurze Pulse sitzt nicht hier am Eingang,
+    // sondern in processSlice auf dem extrahierten Basisband-Slice (dort
+    // verliert der Anti-Image-Filter kein Nutzsignal, weil der Slice schmal
+    // ist, und die Banddetektion bleibt ratenunabhaengig).
     if (cfg_.channelize) return classifyChannelized(cfg_, iq, n);
     return classifyLegacy(cfg_, iq, n);
 }
@@ -1009,13 +1143,41 @@ void ModulationClassifier::processSlice(
     double snrDb, double flatDb, const std::vector<double>& psdDb,
     const Band& band, std::size_t detNft, std::size_t timeMul,
     std::vector<PulseResult>& results) const {
-    for (const auto& crop : timeCrops(sliceY, cfg)) {
+    // Upsampling des Basisband-Slices fuer sehr kurze Pulse (z. B. ~180
+    // Samples Puffer mit 13 BPSK-Bit bei sps=8): automatisch, wenn der Slice
+    // kuerzer als 1024 Samples ist (U = clamp(ceil(1024/len),1,8)), sonst
+    // gemaess cfg.upsample (1 = aus, >1 = fester Faktor). Hier (und nicht am
+    // Puffer-Eingang) ist der Anti-Image-Filter unkritisch, weil der Slice
+    // schmalbandig ist, und die Banddetektion bleibt in der Originalrate.
+    // Sample-basierte Schwellwerte werden mit U skaliert; die normierte
+    // Bandbreite in Slice-Rate wird /U gerechnet, Bin-Groessen xU, und die
+    // Ergebniszeiten am Ende /U auf die Originalrate zurueckgerechnet.
+    std::size_t U = 1;
+    if (cfg.upsample > 1) {
+        U = static_cast<std::size_t>(cfg.upsample);
+    } else if (cfg.upsample == 0 && sliceY.size() < 1024) {
+        const double need = 1024.0 / static_cast<double>(sliceY.size());
+        const double u = std::ceil(need);
+        U = u < 1.0 ? 1 : (u > 8.0 ? 8 : static_cast<std::size_t>(u));
+    }
+    ClassifierConfig cfgLoc = cfg;
+    std::vector<cd> up;
+    if (U > 1) {
+        cfgLoc = scaleForUpsample(cfg, U);
+        up = Channelizer::upsample(sliceY, U);
+    }
+    const ClassifierConfig& cfgA = cfgLoc;
+    const std::vector<cd>& yAll = U > 1 ? up : sliceY;
+    const double bwFeat = bwLocal / static_cast<double>(U);
+    const std::size_t bandBinsFeat = bandBins * U;
+    const double tScale = static_cast<double>(timeMul) / static_cast<double>(U);
+    for (const auto& crop : timeCrops(yAll, cfgA)) {
         const std::size_t c0 = crop.first;
         const std::size_t c1 = crop.second;
         const std::size_t len = c1 - c0;
-        if (len < cfg.minPulseLen) continue;
-        std::vector<cd> ys(sliceY.begin() + static_cast<std::ptrdiff_t>(c0),
-                           sliceY.begin() + static_cast<std::ptrdiff_t>(c1));
+        if (len < cfgA.minPulseLen) continue;
+        std::vector<cd> ys(yAll.begin() + static_cast<std::ptrdiff_t>(c0),
+                           yAll.begin() + static_cast<std::ptrdiff_t>(c1));
         // Haertung: nicht-endliche Samples als Null behandeln.
         // NaN/Inf duerfen weder Statistiken vergiften noch in
         // Indexumrechnungen einfliessen; ein Dropout verhaelt
@@ -1035,10 +1197,10 @@ void ModulationClassifier::processSlice(
         if (amax > 1e100)
             for (cd& v : ys) v /= amax;
         const Features f =
-            extractFeatures(ys, 0.0, bwLocal, bandBins, snrDb, flatDb, cfg);
+            extractFeatures(ys, 0.0, bwFeat, bandBinsFeat, snrDb, flatDb, cfgA);
         CoarseClass coarse = CoarseClass::Unknown;
-        if (!stage1(f, cfg, &coarse)) continue;
-        const auto res = stage2(f, cfg, coarse, ys);
+        if (!stage1(f, cfgA, &coarse)) continue;
+        const auto res = stage2(f, cfgA, coarse, ys);
         // Feine Zeitlage (samplegenau): Huellkurven-Schwelle im
         // Crop, relativ zum Crop-Maximum. Die Raender des Crops
         // (Sicherheitsrand, Blockraster) fallen darunter weg.
@@ -1081,10 +1243,14 @@ void ModulationClassifier::processSlice(
             }
         }
         PulseResult r;
-        r.startSample = (segA + c0) * timeMul;
-        r.numSamples = len * timeMul;
-        r.startSampleFine = (segA + c0 + i0) * timeMul;
-        r.numSamplesFine = (i1 - i0) * timeMul;
+        const double base = static_cast<double>(segA) * timeMul;
+        r.startSample = static_cast<std::size_t>(
+            std::lround(base + static_cast<double>(c0) * tScale));
+        r.numSamples = static_cast<std::size_t>(std::lround(len * tScale));
+        r.startSampleFine = static_cast<std::size_t>(
+            std::lround(base + static_cast<double>(c0 + i0) * tScale));
+        r.numSamplesFine =
+            static_cast<std::size_t>(std::lround((i1 - i0) * tScale));
         r.centerFreqRefined = fcRef;
         r.centerFreqNorm =
             static_cast<float>(roundTo(wrap01(fcGlobal), 5));
@@ -1216,7 +1382,7 @@ PskSync ModulationClassifier::synchronizePsk(const std::complex<double>* iq,
         return r;
     std::vector<cd> y = extractPulse(iq, n, pulse);
     sanitizeSlice(y);
-    if (y.size() < 256) return r;
+    if (y.size() < cfg_.minAnalyzeLen) return r;
     {   // Haertung: Extremamplituden normalisieren (skaleninvariant).
         double amax = 0.0;
         for (const cd& v : y) amax = std::max(amax, std::abs(v));
@@ -1242,7 +1408,7 @@ PskSync ModulationClassifier::synchronizePsk(const std::complex<double>* iq,
     // Symboltakt + Auge: batchweise ueber die zyklische Leistungslinie.
     std::vector<double> env2(f.n);
     for (std::size_t i = 0; i < f.n; ++i) env2[i] = f.env[i] * f.env[i];
-    const auto rp = rsFromCyclic(env2, f.n, f.bw);
+    const auto rp = rsFromCyclic(env2, f.n, f.bw, 0, cfg_.rsBwDivLo, cfg_.rsBwDivHi, cfg_.tRsProm);
     if (rp.first <= 0.0) return r;
     const double sps = 1.0 / rp.first;
     const double off = eyeOffset(f.env, f.n, sps);
@@ -1328,7 +1494,7 @@ ChirpParams ModulationClassifier::analyzeChirp(
     if (pulse.modulation != ModulationType::Chirp) return r;
     std::vector<cd> y = extractPulse(iq, n, pulse);
     sanitizeSlice(y);
-    if (y.size() < 256) return r;
+    if (y.size() < cfg_.minAnalyzeLen) return r;
     {   // Haertung: Extremamplituden normalisieren (skaleninvariant).
         double amax = 0.0;
         for (const cd& v : y) amax = std::max(amax, std::abs(v));
@@ -1415,7 +1581,7 @@ SymbolStream ModulationClassifier::extractSymbols(
     if (pulse.modulation == ModulationType::FSK2) {
         std::vector<cd> y = extractPulse(iq, n, pulse);
         sanitizeSlice(y);
-        if (y.size() < 256) return r;
+        if (y.size() < cfg_.minAnalyzeLen) return r;
         const Features f =
             extractFeatures(y, pulse.centerFreqRefined, pulse.bandwidthNorm,
                             pulse.bandBins, pulse.snrDb,

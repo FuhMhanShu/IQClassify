@@ -68,6 +68,13 @@ public:
     static std::vector<std::complex<double>> resample(
         const std::vector<std::complex<double>>& y, std::size_t D);
 
+    // Upsampling um U: Zero-Stuffing + Anti-Image-Tiefpass (Hann-Sinc,
+    // Grenzfrequenz 0.45/U auf die Ausgaberate normiert, Verstaerkung U,
+    // symmetrisch -> zero delay). out.size() == y.size()*U; Frequenzen sind
+    // rateninvariant, Zeiten skalieren mit U.
+    static std::vector<std::complex<double>> upsample(
+        const std::vector<std::complex<double>>& y, std::size_t U);
+
 private:
     const ClassifierConfig& cfg_;
 };

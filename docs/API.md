@@ -202,6 +202,15 @@ Schwerpunkt, so breit wie der Bereich inkl. Waechter).
   Merkmalsextraktion dezimiert (sample-basierte Schwellwerte werden skaliert,
   Ergebnisse zurückgerechnet).
 
+- Sehr kurze Pulse (~180 Samples, z. B. 13 BPSK-Bit bei sps=8): Das
+  Upsampling sitzt auf dem extrahierten Basisband-Slice in `processSlice`
+  (`ClassifierConfig::upsample`: 0 = automatisch fuer Slice < 1024 Samples,
+  1 = aus, >1 = fester Faktor; Zeiten der Ergebnisse werden /U gerechnet,
+  Frequenzen bleiben in der Originalrate). Kombiniert mit
+  `ClassifierConfig::shortPulseProfile()` (feinere Segmentierung,
+  `minPulseLen=96`, `timingMinSyms=8`, angepasste Symbolratensuche) werden
+  solche Pulse zuverlaessig detektiert und lokalisiert (Test 20).
+
 ## ClassifierConfig
 
 Alle Schwellwerte der Referenzvalidierung, gruppiert wie in

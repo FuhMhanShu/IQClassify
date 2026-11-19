@@ -28,6 +28,16 @@ double PulseSegmenter::noiseFloor(const std::complex<double>* x,
     // Gruppen mit exakter digitaler Stille (Median <= 1e-20) werden
     // uebersprungen; sie wuerden den Boden auf null druecken und jede
     // physikalische Rauschgruppe als Puls erscheinen lassen.
+    // Bei sehr kurzen Puffern (wenige Bloecke) ist die Gruppen-Statistik zu
+    // sprunghaft (eine Gruppe kann Stille und Puls mischen); dort wird statt-
+    // dessen das 10%-Perzentil der Blockenergien genommen.
+    if (nb < 32) {
+        std::vector<double> se = energy;
+        std::sort(se.begin(), se.end());
+        const std::size_t idx = se.size() / 10;
+        const double p20 = se[idx];
+        if (p20 > 1e-20) return p20 < 1e-30 ? 1e-30 : p20;
+    }
     const std::size_t g = cfg.segFloorGroup;
     const std::size_t ng = (nb + g - 1) / g;
     bool haveFloor = false;

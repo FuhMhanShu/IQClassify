@@ -21,6 +21,15 @@ struct ClassifierConfig {
                               // (Zeitsegmentierung, Crops, Merkmale, Stufe 1/2).
                               // false = Legacy-Pfad (erst Zeitsegmentierung, dann
                               // Banddetektion je Segment)
+    int upsample = 0;         // Upsampling des extrahierten Basisband-Slices fuer
+                              // sehr kurze Pulse (z. B. 180-Sample-Puffer mit 13
+                              // BPSK-Bit bei sps=8): 0 = automatisch (Slice < 1024
+                              // Samples -> U = clamp(ceil(1024/len),1,8)), 1 = aus,
+                              // >1 = fester Faktor U. Sample-basierte Schwellwerte
+                              // werden mit U skaliert, Bandbreite/Bins der Merkmale
+                              // umgerechnet, Ergebniszeiten auf das Original
+                              // zurueckgerechnet (/U); Frequenzen bleiben in der
+                              // Originalrate (Kanalisierung laeuft unveraendert)
     int threads = 0;          // Parallelverarbeitung der Kanaele/Segmente:
                               // 0 = automatisch (min(hardware_concurrency, 8)),
                               // 1 = seriell. Wirkt ab ~32k Samples Pufferlaenge;
@@ -38,6 +47,8 @@ struct ClassifierConfig {
     double segOffDb = 5.0;          // Hysterese: Aus-Schwelle ueber Boden
     std::size_t segMargin = 64;      // beidseitig angelagerte Samples
     std::size_t minPulseLen = 400;   // minimale akzeptierte Pulslaenge
+    std::size_t minAnalyzeLen = 256; // Mindestlaenge eines Crops fuer Symbolanalyse
+                                     // und CP-Autokorrelation (Stufe 2)
     double cropOnRelDb = 12.0;       // Crop-Ein: innerhalb dieses Bereichs des Slice-Maximums
     double cropOffRelDb = 20.0;      // Crop-Aus: unterhalb dieses Bereichs des Slice-Maximums
     double cropFadeMergeDb = 5.0;    // Fade-Merge: zwei Crops verschmelzen, wenn die
@@ -96,6 +107,11 @@ struct ClassifierConfig {
     // ---- Symboltiming
     std::size_t timingMinSyms = 24;
     double tRsProm = 5.0;        // Prominenz der zyklischen Leistungslinie
+    double rsBwDivLo = 1.5;      // untere K-Grenze der Symbolratensuche:
+                                 // K ab bw/rsBwDivLo (fr = K/nft); kurze Pulse
+                                 // haben ein relativ breites Band -> dort weiter
+                                 // nach unten oeffnen (siehe shortPulseProfile)
+    double rsBwDivHi = 1.05;     // obere K-Grenze: K bis bw/rsBwDivHi
     double mfAlpha = 0.22;       // Empfangs-RRC-Rolloff fuer Symbolabtastung
     std::size_t mfSpan = 8;      // Empfangsfilterlaenge in Symbolen
     double mfMinRel = 0.30;      // Symbolamplituden-Gate relativ zum Median
@@ -122,6 +138,29 @@ struct ClassifierConfig {
 
     // ---- Dwell (informativ)
     int tDwellRun = 4;
+
+    // Profil fuer sehr kurze Pulse (z. B. ~180-Sample-Puffer mit 13
+    // BPSK-Bit bei sps=8): feinere Blocksegmentierung, kleinere
+    // Mindestpulslaenge, niedrigere Symbolschwelle und kleinere
+    // Analyse-Mindestlaenge. Default-Profil bleibt auf laengere Pulse
+    // kalibriert (minPulseLen 400).
+    static ClassifierConfig shortPulseProfile() {
+        ClassifierConfig c;
+        c.segWin = 16;
+        c.segFloorGroup = 4;
+        c.segMargin = 16;
+        c.minPulseLen = 96;
+        c.detectWin = 256;
+        c.timingMinSyms = 8;
+        c.minAnalyzeLen = 64;
+        c.tRsProm = 3.0;
+        c.rsBwDivLo = 2.0;  // kurze Pulse: Band relativ breit gegen Symbolrate
+        // Das fenstergemittelte PAPR kurzer Pulse ist durch die Pulsflanken
+        // natuerlich erhoeht; die OFDM-Schwelle wird daher angehoben, damit
+        // kurze PSK-Pulse nicht als NoiseLike (OFDM) durchgereicht werden.
+        c.tPaprOfdmDb = 9.0;
+        return c;
+    }
 };
 
 }  // namespace iqclassify
