@@ -10,7 +10,9 @@ klassifiziert die Modulationsart jedes Pulses in zwei Stufen:
 - Stufe 1 (grob): Ton, Frequenzmodulation, Phasenmodulation, flaechiges
   Signal.
 - Stufe 2 (fein): Unmodulated (CW), BPSK, QPSK, FSK2, Chirp, OFDM,
-  QAM16, QAM64, QAM256.
+  QAM16, QAM64, QAM256, FrankCode (polyphase Frank-Code, Radar: Treppe der
+  Momentanfrequenz mit M Stufen; Analyse via `analyzeFrank`: Ordnung M,
+  Code-Laenge M^2, Chip-Rate, Code-Phasen).
 
 ## Merkmale
 

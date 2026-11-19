@@ -8,8 +8,9 @@ Klassifikation der Modulationsart von Pulsen in komplexen IQ-Abtastströmen
 - Stufe 1, grobe Klasse: Ton, Frequenzmodulation (Chirp/FSK),
   Phasenmodulation (PSK/QAM), flächiges rauschartiges Signal (OFDM).
 - Stufe 2, Modulationsart: Unmodulated (unmodulierter Träger, CW), BPSK,
-  QPSK, FSK2, Chirp, OFDM, QAM16, QAM64, QAM256. Nicht entscheidbare Pulse
-  werden als Unknown mit niedriger Konfidenz ausgegeben.
+  QPSK, FSK2, Chirp, OFDM, QAM16, QAM64, QAM256, FrankCode (polyphase
+  Frank-Code, Radar). Nicht entscheidbare Pulse werden als Unknown mit
+  niedriger Konfidenz ausgegeben.
 
 ## Mehrpuls-Szenarien
 
@@ -60,6 +61,23 @@ Auch Signale unterhalb von 6 dB SNR müssen erkannt werden, Ziel ~2 dB:
 - Reines Rauschen darf auch bei niedrigem SNR keine Pulse erzeugen.
 -Geeignete IQ-Testsignale (CW, Chirp, BPSK, QPSK, QAM16, FSK2, OFDM) bei
   0-4 dB SNR in der Testsuite verankert.
+
+## Frank-Codes (polyphase Radar-Codes)
+
+- Frank-Code der Ordnung M (Laenge N = M^2 Chips, Chip (i,j) mit Phase
+  2*pi*i*j/M) wird als `FrankCode` klassifiziert. Erkannt wird die
+  Treppenstruktur der Momentanfrequenz: M Stufen, gleichmaessig beabstandet,
+  jede lange am Stueck (Run-Laenge), Stufen-Mitten linear gegen den Index
+  (R^2). Abgrenzung: Chirp (kontinuierlicher Sweep, kein langer Run pro
+  Stufe), FSK2 (2 Stufen), PSK (kein Sweep).
+- Analyse-API `analyzeFrank`: Ordnung M, Code-Laenge N = M^2, Chip-Rate,
+  Mittenfrequenz, belegtes Band, SNR, R^2 der Stufen-Mitten und die
+  geschaetzten Code-Phasen (N Werte, [0, 2pi)).
+- Testgenerator `iqtest::genFrank(rng, M, sps)`; Testsuite Szenario 21.
+- Dokumentierte Grenze: das Kamm-Spektrum hoeherer Ordnungen kann bei
+  niedrigem SNR in Subbaender zerfallen (dann mehrere FrankCode-Pulse);
+  direkt an einen starken CW grenzende kurze Pulse teilen sich ein
+  Zeitsegment und werden als ein Puls behandelt (bekannte Segment-Grenze).
 
 ## Analyse-API je erkanntem Puls
 

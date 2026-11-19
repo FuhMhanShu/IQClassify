@@ -110,6 +110,34 @@ std::vector<cd> genFsk2(std::mt19937& rng, std::size_t nsym, int sps,
     return out;
 }
 
+std::vector<cd> genFrank(std::mt19937& rng, int m, int sps, double alpha) {
+    std::uniform_real_distribution<double> u01(0.0, 1.0);
+    const std::size_t nsym = static_cast<std::size_t>(m) * m;
+    const std::size_t guard = static_cast<std::size_t>(8 * sps);
+    std::vector<cd> up(nsym * static_cast<std::size_t>(sps) + guard,
+                       cd(0.0, 0.0));
+    const double ph0 = u01(rng) * 2.0 * kPi;
+    for (int i = 0; i < m; ++i) {
+        for (int j = 0; j < m; ++j) {
+            const double a = ph0 + 2.0 * kPi * i * j / m;
+            up[(static_cast<std::size_t>(i) * m + j) *
+                   static_cast<std::size_t>(sps) +
+               static_cast<std::size_t>(4 * sps)] =
+                cd(std::cos(a), std::sin(a));
+        }
+    }
+    const std::vector<double> taps =
+        iqclassify::detail::rrcTaps(sps, alpha, 8);
+    std::vector<cd> y = fir(up, taps);
+    y.assign(y.begin() + static_cast<std::ptrdiff_t>(4 * sps),
+             y.begin() + static_cast<std::ptrdiff_t>(4 * sps) +
+                 static_cast<std::ptrdiff_t>(nsym * sps));
+    const double p = meanPower(y);
+    const double sc = 1.0 / std::sqrt(p > 1e-30 ? p : 1e-30);
+    for (cd& v : y) v *= sc;
+    return y;
+}
+
 std::vector<cd> genChirp(std::size_t nsamp, double bw, bool up) {
     const double rate =
         bw / static_cast<double>(nsamp) * (up ? 1.0 : -1.0);

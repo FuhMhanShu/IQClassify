@@ -33,6 +33,7 @@ const char* toString(ModulationType t) {
         case ModulationType::QAM16: return "QAM16";
         case ModulationType::QAM64: return "QAM64";
         case ModulationType::QAM256: return "QAM256";
+        case ModulationType::FrankCode: return "FrankCode";
     }
     return "Unknown";
 }
@@ -651,6 +652,202 @@ std::vector<cd> mfSymbols(const std::vector<cd>& y,
 }
 
 // --------------------------------------------------------------------------
+// Frank-Code-Test (polyphase Radar-Code)
+// --------------------------------------------------------------------------
+// Die Momentanfrequenz eines Frank-Codes der Ordnung M ist eine Treppe mit
+// M Stufen: jede Stufe dauert M*sps Samples, die Stufen-Mitten liegen
+// gleichabstaendig auf dem Frequenzkreis und werden in der Zeit monoton
+// durchlaufen. Rueckgabe: Ordnung M (>= tFrankMinModes) oder 0; r2Out
+// erhaelt das R^2 der Stufen-Mitten gegen den Stufen-Index.
+int detectFrankOrder(const Features& f, const ClassifierConfig& cfg,
+                     double* r2Out = nullptr) {
+    if (r2Out) *r2Out = 0.0;
+    const std::size_t n = f.n;
+    if (n < 96) return 0;
+    const std::size_t n1 = n - 1;
+    double me = 0.0;
+    for (double e : f.env) me += e;
+    me /= static_cast<double>(n);
+    const double gate = cfg.histEnvRel * me;
+    // Median-Filter ueber finst (killt die Spruenge an den Chipgrenzen).
+    const std::size_t W = n1 / 256 > 3 ? n1 / 256 : 3;
+    std::vector<double> fm(n1);
+    for (std::size_t i = 0; i < n1; ++i) {
+        std::vector<double> w;
+        w.reserve(2 * W + 1);
+        const std::size_t lo = i >= W / 2 ? i - W / 2 : 0;
+        const std::size_t hi = std::min(n1 - 1, i + W / 2);
+        for (std::size_t j = lo; j <= hi; ++j)
+            if (f.env[j] >= gate) w.push_back(f.finst[j]);
+        if (w.empty()) {
+            fm[i] = f.finst[i];
+            continue;
+        }
+        std::sort(w.begin(), w.end());
+        fm[i] = w[w.size() / 2];
+    }
+    // Histogramm der gefilterten Werte ueber den beobachteten Bereich
+    // [fmin, fmax] (der Sweep eines Frank-Codes belegt nur einen Teil des
+    // Frequenzkreises).
+    double fmin = 1e300, fmax = -1e300;
+    std::size_t tot = 0;
+    for (std::size_t i = 0; i < n1; ++i) {
+        if (f.env[i] < gate) continue;
+        fmin = std::min(fmin, fm[i]);
+        fmax = std::max(fmax, fm[i]);
+        ++tot;
+    }
+    if (tot < 48 || !(fmax - fmin > 1e-9)) return 0;
+    const int Q = 64;
+    const double scale = Q / (fmax - fmin);
+    std::vector<double> hist(static_cast<std::size_t>(Q), 0.0);
+    for (std::size_t i = 0; i < n1; ++i) {
+        if (f.env[i] < gate) continue;
+        int b = static_cast<int>((fm[i] - fmin) * scale);
+        if (b >= Q) b = Q - 1;
+        hist[static_cast<std::size_t>(b)] += 1.0;
+    }
+    // geglaettete Gruppen (wie das Moden-Histogramm in extractFeatures)
+    std::vector<double> sm(static_cast<std::size_t>(Q), 0.0);
+    for (int i = 0; i < Q; ++i) {
+        double acc = hist[static_cast<std::size_t>(i)];
+        if (i > 0) acc += hist[static_cast<std::size_t>(i - 1)];
+        if (i < Q - 1) acc += hist[static_cast<std::size_t>(i + 1)];
+        sm[static_cast<std::size_t>(i)] = acc / 3.0;
+    }
+    const double hmax = *std::max_element(sm.begin(), sm.end());
+    if (hmax <= 0.0) return 0;
+    struct Grp {
+        double mass;
+        double center;
+    };
+    std::vector<Grp> groups;
+    {
+        int i = 0;
+        while (i < Q) {
+            if (sm[static_cast<std::size_t>(i)] > cfg.modeBinThr * hmax) {
+                int j = i;
+                while (j + 1 < Q &&
+                       sm[static_cast<std::size_t>(j + 1)] > cfg.modeBinThr * hmax)
+                    ++j;
+                double mass = 0.0, csum = 0.0;
+                for (int k = i; k <= j; ++k) {
+                    mass += hist[static_cast<std::size_t>(k)];
+                    csum += hist[static_cast<std::size_t>(k)] *
+                            (fmin + (k + 0.5) / scale);
+                }
+                groups.push_back({mass, mass > 0 ? csum / mass : 0.0});
+                i = j + 1;
+            } else {
+                ++i;
+            }
+        }
+    }
+    if (groups.size() < 2) return 0;
+    // Sweep ueber die +-0.5-Grenze: ins lineare Frame aufdrehen
+    if (fmax - fmin > 0.4)
+        for (Grp& g : groups)
+            if (g.center < 0.0) g.center += 1.0;
+    std::sort(groups.begin(), groups.end(),
+              [](const Grp& a, const Grp& b) { return a.center < b.center; });
+    // fein aufgeteilte Stufen (Rausch-Splits) verschmelzen
+    {
+        bool merged = true;
+        while (merged && groups.size() > 2) {
+            merged = false;
+            std::vector<double> g0;
+            for (std::size_t k = 0; k + 1 < groups.size(); ++k)
+                g0.push_back(groups[k + 1].center - groups[k].center);
+            std::vector<double> gs = g0;
+            std::sort(gs.begin(), gs.end());
+            const double med = gs[gs.size() / 2];
+            for (std::size_t k = 0; k + 1 < groups.size(); ++k) {
+                if (g0[k] < 0.45 * med) {
+                    Grp& a = groups[k];
+                    const Grp b = groups[k + 1];
+                    const double m = a.mass + b.mass;
+                    a.center = (a.center * a.mass + b.center * b.mass) / m;
+                    a.mass = m;
+                    groups.erase(groups.begin() + static_cast<std::ptrdiff_t>(k + 1));
+                    merged = true;
+                    break;
+                }
+            }
+        }
+    }
+    const int P = static_cast<int>(groups.size());
+    if (P < cfg.tFrankMinModes || P > cfg.tFrankMaxModes) return 0;
+    // Coverage: Anteil der gated Samples in Stufen
+    double msum = 0.0;
+    for (const Grp& g : groups) msum += g.mass;
+    if (msum < cfg.tFrankCover * static_cast<double>(tot)) return 0;
+    // interne Stufen-Abstaende gleichmaessig?
+    std::vector<double> gaps;
+    for (int k = 0; k < P - 1; ++k)
+        gaps.push_back(groups[static_cast<std::size_t>(k) + 1].center -
+                       groups[static_cast<std::size_t>(k)].center);
+    const double gmin = *std::min_element(gaps.begin(), gaps.end());
+    const double gmax = *std::max_element(gaps.begin(), gaps.end());
+    if (gmin <= 0.0 || gmax > 2.2 * gmin) return 0;
+    // R^2 der Stufen-Mitten gegen den Index
+    double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+    for (int k = 0; k < P; ++k) {
+        const double x = k, y = groups[static_cast<std::size_t>(k)].center;
+        sx += x; sy += y; sxx += x * x; sxy += x * y;
+    }
+    const double den = P * sxx - sx * sx;
+    double r2 = 0.0;
+    if (std::abs(den) > 1e-30) {
+        const double b = (P * sxy - sx * sy) / den;
+        const double a = (sy - b * sx) / P;
+        double ssr = 0.0, sst = 0.0;
+        for (int k = 0; k < P; ++k) {
+            const double x = k, y = groups[static_cast<std::size_t>(k)].center;
+            const double yh = a + b * x;
+            ssr += (y - yh) * (y - yh);
+            sst += (y - sy / P) * (y - sy / P);
+        }
+        r2 = sst > 1e-30 ? 1.0 - ssr / sst : 0.0;
+    }
+    if (r2 < cfg.tFrankR2) return 0;
+    if (r2Out) *r2Out = r2;
+    // Stufendauer in der Zeit: jeder Stufe ein langer Run (beim Frank-Code
+    // M*sps Samples; beim PSK-Rauschen nur kurze Runs).
+    {
+        std::vector<std::size_t> maxRun(static_cast<std::size_t>(P), 0);
+        int prev = -1;
+        std::size_t run = 0;
+        for (std::size_t i = 0; i < n1; ++i) {
+            if (f.env[i] < gate) continue;
+            int best = 0;
+            double bd = 1e300;
+            for (int k = 0; k < P; ++k) {
+                double d = fm[i] - groups[static_cast<std::size_t>(k)].center;
+                d = std::fmod(d + 1.5, 1.0) - 0.5;
+                d = std::abs(d);
+                if (d < bd) { bd = d; best = k; }
+            }
+            if (prev >= 0 && best != prev) {
+                maxRun[static_cast<std::size_t>(prev)] =
+                    std::max(maxRun[static_cast<std::size_t>(prev)], run);
+                run = 0;
+            }
+            ++run;
+            prev = best;
+        }
+        if (prev >= 0)
+            maxRun[static_cast<std::size_t>(prev)] =
+                std::max(maxRun[static_cast<std::size_t>(prev)], run);
+        const std::size_t lMin = tot / (3 * static_cast<std::size_t>(P)) > 8
+                                     ? tot / (3 * static_cast<std::size_t>(P))
+                                     : 8;
+        for (int k = 0; k < P; ++k)
+            if (maxRun[static_cast<std::size_t>(k)] < lMin) return 0;
+    }
+    return P;
+}
+
+// --------------------------------------------------------------------------
 // Stufe 1
 // --------------------------------------------------------------------------
 bool stage1(const Features& f, const ClassifierConfig& cfg,
@@ -673,6 +870,10 @@ bool stage1(const Features& f, const ClassifierConfig& cfg,
         return true;
     }
     if (f.bandBins <= cfg.tBwCwBins) {
+        *out = CoarseClass::FrequencyModulated;
+        return true;
+    }
+    if (detectFrankOrder(f, cfg) >= cfg.tFrankMinModes) {
         *out = CoarseClass::FrequencyModulated;
         return true;
     }
@@ -878,6 +1079,15 @@ std::pair<ModulationType, double> stage2(const Features& f,
         return {ModulationType::Unmodulated, 0.9};
     }
     if (coarse == CoarseClass::FrequencyModulated) {
+        // Frank-Code zuerst: seine Treppe hat zwar eine hohe lineare
+        // Komponente, aber die Stufen-Struktur ist spezifischer als der
+        // Chirp-Fit.
+        double frankR2 = 0.0;
+        const int frankM = detectFrankOrder(f, cfg, &frankR2);
+        if (frankM >= cfg.tFrankMinModes) {
+            return {ModulationType::FrankCode,
+                    std::min(0.95, 0.55 + 0.4 * frankR2)};
+        }
         if (f.chirpR2 > cfg.tChirpR2 && f.chirpSweep > cfg.tChirpSweep) {
             return {ModulationType::Chirp,
                     std::min(0.98, 0.5 + 0.45 * f.chirpR2)};
@@ -1555,6 +1765,89 @@ ChirpParams ModulationClassifier::analyzeChirpF(
         buf[i] = std::complex<double>(static_cast<double>(iq[i].real()),
                                       static_cast<double>(iq[i].imag()));
     return analyzeChirp(buf.data(), buf.size(), pulse);
+}
+
+FrankParams ModulationClassifier::analyzeFrank(
+    const std::complex<double>* iq, std::size_t n,
+    const PulseResult& pulse) const {
+    FrankParams r;
+    if (iq == nullptr || n == 0) return r;
+    if (pulse.modulation != ModulationType::FrankCode) return r;
+    std::vector<cd> y = extractPulse(iq, n, pulse);
+    sanitizeSlice(y);
+    if (y.size() < cfg_.minAnalyzeLen) return r;
+    {   // Haertung: Extremamplituden normalisieren (skaleninvariant).
+        double amax = 0.0;
+        for (const cd& v : y) amax = std::max(amax, std::abs(v));
+        if (amax > 1e100)
+            for (cd& v : y) v /= amax;
+    }
+    // gleiches Slice-Upsampling wie in processSlice (kurze Pulse)
+    std::size_t U = 1;
+    if (cfg_.upsample > 1) {
+        U = static_cast<std::size_t>(cfg_.upsample);
+    } else if (cfg_.upsample == 0 && y.size() < 1024) {
+        const double need = 1024.0 / static_cast<double>(y.size());
+        const double u = std::ceil(need);
+        U = u < 1.0 ? 1 : (u > 8.0 ? 8 : static_cast<std::size_t>(u));
+    }
+    ClassifierConfig cfgA = cfg_;
+    if (U > 1) {
+        cfgA = scaleForUpsample(cfg_, U);
+        y = Channelizer::upsample(y, U);
+    }
+    const double bwFeat = pulse.bandwidthNorm / static_cast<double>(U);
+    const Features f =
+        extractFeatures(y, pulse.centerFreqRefined, bwFeat,
+                        pulse.bandBins * U, pulse.snrDb, pulse.spectralFlatnessDb,
+                        cfgA);
+    double r2 = 0.0;
+    const int M = detectFrankOrder(f, cfgA, &r2);
+    if (M < cfg_.tFrankMinModes) return r;
+    r.valid = true;
+    r.order = M;
+    r.codeLength = static_cast<std::size_t>(M) * M;
+    r.startSample = pulse.startSampleFine;
+    r.numSamples = pulse.numSamplesFine;
+    r.centerFreqNorm = pulse.centerFreqRefined;
+    r.bandwidthNorm = pulse.bandwidthNorm;
+    r.snrDb = pulse.snrDb;
+    r.r2 = r2;
+    // Chip-Rate aus der Pulslaenge: N = M^2 Chips im Slice (Originalrate).
+    const double chipLen = static_cast<double>(y.size()) /
+                           static_cast<double>(r.codeLength) /
+                           static_cast<double>(U);
+    r.chipRateNorm = chipLen > 1e-9 ? 1.0 / chipLen : 0.0;
+    // Code-Phasen an den Chip-Mitten abtasten (auf den Resttraeger
+    // f.residF derotiert, zyklisch [0, 2pi)).
+    r.codePhases.resize(r.codeLength);
+    const double phStep = 2.0 * kPi * f.residF;
+    const double chipLenUp = chipLen * static_cast<double>(U);
+    for (std::size_t k = 0; k < r.codeLength; ++k) {
+        const double c = (static_cast<double>(k) + 0.5) * chipLenUp;
+        const std::size_t ci = static_cast<std::size_t>(c);
+        if (ci >= y.size()) {
+            r.codePhases[k] = 0.0;
+            continue;
+        }
+        const double ph = std::atan2(y[ci].imag(), y[ci].real()) -
+                          phStep * static_cast<double>(ci);
+        double w = std::fmod(ph, 2.0 * kPi);
+        if (w < 0.0) w += 2.0 * kPi;
+        r.codePhases[k] = w;
+    }
+    return r;
+}
+
+FrankParams ModulationClassifier::analyzeFrankF(
+    const std::complex<float>* iq, std::size_t n,
+    const PulseResult& pulse) const {
+    if (iq == nullptr || n == 0) return FrankParams{};
+    std::vector<std::complex<double>> buf(n);
+    for (std::size_t i = 0; i < n; ++i)
+        buf[i] = std::complex<double>(static_cast<double>(iq[i].real()),
+                                      static_cast<double>(iq[i].imag()));
+    return analyzeFrank(buf.data(), buf.size(), pulse);
 }
 
 // ---------------------------------------------------------------------------

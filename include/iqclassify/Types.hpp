@@ -27,6 +27,8 @@ enum class ModulationType : std::uint8_t {
     QAM16 = 7,
     QAM64 = 8,
     QAM256 = 9,
+    FrankCode = 10,  // polyphase Frank-Code (Radar): Treppe der
+                     // Momentanfrequenz mit M Stufen (Ordnung M, Laenge M^2)
 };
 
 // Grobklassifikation (Stufe 1)
@@ -104,6 +106,23 @@ struct ChirpParams {
     double snrDb = 0.0;
     double r2 = 0.0;               // Bestimmtheitsmass des linearen Chirp-Fits
     bool up = true;                // true = aufwaerts, false = abwaerts
+};
+
+// Alle Parameter eines erkannten Frank-Code-Pulses (polyphase Radar-Code).
+struct FrankParams {
+    bool valid = false;
+    std::size_t startSample = 0;   // Pulsanfang im Puffer (startSampleFine)
+    std::size_t numSamples = 0;    // Pulslaenge (numSamplesFine)
+    int order = 0;                 // Ordnung M (Code-Laenge N = M^2)
+    std::size_t codeLength = 0;    // N = M^2
+    double chipRateNorm = 0.0;     // Chip-Rate fraktional (1/(sps_chip))
+    double centerFreqNorm = 0.0;   // Mittenfrequenz des Pulses, zyklisch [0,1)
+    double bandwidthNorm = 0.0;    // belegtes Band (Sweep der Treppe)
+    double snrDb = 0.0;
+    double r2 = 0.0;               // R^2 der Stufen-Mitten gegen Stufen-Index
+    std::vector<double> codePhases;  // geschaetzte Code-Phasen, N Werte in
+                                     // [0, 2pi), Chip k = i*M+j -> Phase
+                                     // ~ 2*pi*i*j/M (mod 2pi)
 };
 
 // Symbol-Schnittstelle fuer PSK- und FSK-Pulse (Symbolextraktion).

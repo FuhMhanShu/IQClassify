@@ -31,6 +31,13 @@ std::vector<cd> genFsk2(std::mt19937& rng, std::size_t nsym, int sps,
 // Linearer Chirp ueber die Bandbreite bw (fraktional).
 std::vector<cd> genChirp(std::size_t nsamp, double bw, bool up = true);
 
+// Frank-Code der Ordnung M (polyphase Radar-Code, Laenge N = M^2 Chips):
+// Chip (i,j), i,j = 0..M-1, hat die Phase 2*pi*i*j/M; jedes Chip wird mit
+// sps Samples RRC-geformt (alpha). Die Momentanfrequenz bildet eine Treppe
+// mit M Stufen der Laenge M*sps (Stufenhub 1/(M*sps) fraktional).
+std::vector<cd> genFrank(std::mt19937& rng, int m, int sps,
+                         double alpha = 0.25);
+
 // Unmodulierter Traeger (CW) mit Zufallsphase.
 std::vector<cd> genCw(std::mt19937& rng, std::size_t nsamp);
 

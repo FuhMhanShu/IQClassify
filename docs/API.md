@@ -211,6 +211,14 @@ Schwerpunkt, so breit wie der Bereich inkl. Waechter).
   `minPulseLen=96`, `timingMinSyms=8`, angepasste Symbolratensuche) werden
   solche Pulse zuverlaessig detektiert und lokalisiert (Test 20).
 
+- `analyzeFrank(iq, n, pulse)` liefert fuer `FrankCode`-Pulse alle Parameter:
+  Ordnung `order` (M), `codeLength` (N = M^2), `chipRateNorm` (Chip-Rate
+  fraktional), `centerFreqNorm`, `bandwidthNorm`, `snrDb`, `r2` (R^2 der
+  Stufen-Mitten gegen den Stufen-Index) und `codePhases` (N geschaetzte
+  Code-Phasen in [0, 2pi), Chip k = i*M+j mit Phase ~ 2*pi*i*j/M).
+  `analyzeFrankF` ist die float-Variante. Fuer andere Modulationen ist
+  `valid == false`.
+
 ## ClassifierConfig
 
 Alle Schwellwerte der Referenzvalidierung, gruppiert wie in

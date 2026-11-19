@@ -39,6 +39,11 @@
 //      Lokalisierung via automatischem Slice-Upsampling (cfg.upsample) +
 //      shortPulseProfile; Rauschboden bei wenigen Bloecken per Perzentil;
 //      CW/FSK2/QPSK ebenso; Default-Profil erwartet laengere Pulse (0 Pulse)
+//  21. Frank-Codes (polyphase Radar-Codes, Ordnung M, Laenge M^2): Detektion
+//      als FrankCode via Treppenstruktur der Momentanfrequenz (Stufen gleich-
+//      abstaendig, lange Runs, R^2 der Stufen-Mitten), M=8/16 bei 20/15 dB,
+//      Mehrpuls-Szene Frank+CW, Analyse-API analyzeFrank (Ordnung, Chip-Rate,
+//      Code-Phasen); Chirp/FSK2/QPSK duerfen nicht als FrankCode durchgehen
 //
 // Ein Szenario besteht genau dann den Test, wenn die sortierte Labelmenge
 // der erkannten Pulse der erwarteten entspricht. Fuer
@@ -1696,6 +1701,130 @@ int main() {
                 std::printf("[FAIL] %-24s nRes=%zu\n", "short-noupsample",
                             res.size());
             }
+        }
+    }
+    // 21. Frank-Codes (polyphase Radar-Code): Treppe der Momentanfrequenz.
+    {
+        // M=8, 20 dB und 15 dB, je 3 Seeds: genau 1 Puls, FrankCode, fc-Lage.
+        for (double snr : {20.0, 15.0}) {
+            ++g_total;
+            int okc = 0;
+            double fcErr = 0.0;
+            for (int seed = 1; seed <= 3; ++seed) {
+                std::mt19937 rng(seed * 10 + 8);
+                iqtest::Recorder rec;
+                rec.silence(2000);
+                rec.add(iqtest::genFrank(rng, 8, 8), 0.15, snr);
+                rec.silence(2000);
+                iqclassify::ClassifierConfig cfg;
+                iqclassify::ModulationClassifier clf(cfg);
+                const auto res =
+                    clf.classify(rec.buffer().data(), rec.buffer().size());
+                if (res.size() == 1 &&
+                    res[0].modulation == iqclassify::ModulationType::FrankCode) {
+                    ++okc;
+                    fcErr = std::max(fcErr, cycDist(res[0].centerFreqRefined, 0.15));
+                }
+            }
+            if (okc == 3 && fcErr < 0.03) {
+                ++g_ok;
+                std::printf("[OK ] %-24s M=8 snr=%.0f: 3/3 FrankCode fcErr=%.4f\n",
+                            "frank-M8", snr, fcErr);
+            } else {
+                std::printf("[FAIL] %-24s M=8 snr=%.0f: %d/3 fcErr=%.4f\n",
+                            "frank-M8", snr, okc, fcErr);
+            }
+        }
+        // M=16, 20 dB: mindestens ein FrankCode-Puls (das Kamm-Spektrum kann
+        // bei hoeherer Ordnung in Subbaender zerfallen).
+        {
+            ++g_total;
+            std::mt19937 rng(77);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genFrank(rng, 16, 8), 0.15, 20.0);
+            rec.silence(2000);
+            iqclassify::ClassifierConfig cfg;
+            iqclassify::ModulationClassifier clf(cfg);
+            const auto res =
+                clf.classify(rec.buffer().data(), rec.buffer().size());
+            bool any = false;
+            for (const auto& r : res)
+                if (r.modulation == iqclassify::ModulationType::FrankCode)
+                    any = true;
+            if (any && !res.empty()) {
+                ++g_ok;
+                std::printf("[OK ] %-24s M=16 snr=20: %zu Pulse, mind. 1 FrankCode\n",
+                            "frank-M16", res.size());
+            } else {
+                std::printf("[FAIL] %-24s M=16 snr=20: n=%zu\n", "frank-M16",
+                            res.size());
+                for (const auto& r : res) printPulse(r);
+            }
+        }
+        // Mehrpuls: Frank + CW zeitlich getrennt in getrennten Baendern.
+        {
+            std::mt19937 rng(42);
+            iqtest::Recorder rec;
+            rec.silence(3000);
+            rec.add(iqtest::genFrank(rng, 8, 8), 0.15, 20.0);
+            rec.silence(800);
+            rec.add(iqtest::genCw(rng, 4000), -0.35, 20.0);
+            rec.silence(3000);
+            scenario("frank-multi-cw", rec.buffer(), "FrankCode/Unmodulated");
+        }
+        // Analyse-API: Ordnung, Code-Laenge, Chip-Rate, R^2, Code-Phasen.
+        {
+            ++g_total;
+            std::mt19937 rng(11);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genFrank(rng, 8, 8), 0.15, 20.0);
+            rec.silence(2000);
+            iqclassify::ClassifierConfig cfg;
+            iqclassify::ModulationClassifier clf(cfg);
+            const auto res =
+                clf.classify(rec.buffer().data(), rec.buffer().size());
+            bool ok = res.size() == 1 &&
+                      res[0].modulation == iqclassify::ModulationType::FrankCode;
+            iqclassify::FrankParams fp;
+            if (ok) {
+                fp = clf.analyzeFrank(rec.buffer().data(), rec.buffer().size(),
+                                      res[0]);
+                ok = fp.valid && fp.order >= 3 && fp.order <= 16 &&
+                     fp.codeLength ==
+                         static_cast<std::size_t>(fp.order) * fp.order &&
+                     fp.r2 > 0.9 && fp.chipRateNorm > 0.01 &&
+                     fp.chipRateNorm < 0.5 && fp.codePhases.size() == fp.codeLength;
+            }
+            if (ok) {
+                ++g_ok;
+                std::printf("[OK ] %-24s M=8: order=%d N=%zu chipRate=%.4f r2=%.3f\n",
+                            "frank-analyze", fp.order, fp.codeLength,
+                            fp.chipRateNorm, fp.r2);
+            } else {
+                std::printf("[FAIL] %-24s nRes=%zu valid=%d order=%d r2=%.3f\n",
+                            "frank-analyze", res.size(), (int)fp.valid, fp.order,
+                            fp.r2);
+            }
+        }
+        // Negativ: Chirp und FSK2 duerfen nicht als FrankCode durchgehen
+        // (wird zusaetzlich durch die gesamte uebrige Suite abgesichert).
+        {
+            std::mt19937 rng(5);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genChirp(8192, 0.25, true), 0.10, 20.0);
+            rec.silence(2000);
+            scenario("frank-neg-chirp", rec.buffer(), "Chirp");
+        }
+        {
+            std::mt19937 rng(6);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genFsk2(rng, 1024, 8), 0.10, 20.0);
+            rec.silence(2000);
+            scenario("frank-neg-fsk2", rec.buffer(), "FSK2");
         }
     }
     std::printf("\nscore: %d/%d\n", g_ok, g_total);

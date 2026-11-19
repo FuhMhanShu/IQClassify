@@ -73,6 +73,15 @@ public:
     ChirpParams analyzeChirpF(const std::complex<float>* iq, std::size_t n,
                               const PulseResult& pulse) const;
 
+    // Alle Parameter eines erkannten Frank-Code-Pulses (polyphase
+    // Radar-Code): Ordnung M, Code-Laenge N = M^2, Chip-Rate, Mittenfrequenz,
+    // belegtes Band, SNR, R^2 der Stufen-Mitten und die geschaetzten
+    // Code-Phasen (N Werte). Nur fuer FrankCode.
+    FrankParams analyzeFrank(const std::complex<double>* iq, std::size_t n,
+                             const PulseResult& pulse) const;
+    FrankParams analyzeFrankF(const std::complex<float>* iq, std::size_t n,
+                              const PulseResult& pulse) const;
+
     // Symbol-Schnittstelle fuer PSK und FSK: liefert Symboltakt und Symbole
     // (PSK) bzw. Frequenz/Ton-Entscheidung pro Symbol (FSK2). Fuer andere
     // Modulationen ist valid == false.
