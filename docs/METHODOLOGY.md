@@ -56,6 +56,27 @@ Toren gegen das Slice-Maximum (12/20 dB). Hat der Slice kein eigenes
 Schweigen (ein Puls füllt das Segment), wird der gesamte Slice als ein
 Puls ausgegeben.
 
+## Lokalisierung (Wiederfinden des Pulses im IQ-Signal)
+
+Jedes `PulseResult` trägt neben dem groben Blockraster-Fenster eine feine
+Lage, direkt aus den Zwischengroessen der Pipeline abgeleitet:
+
+- Zeit (samplegenau): Hüllkurve des (bandgefilterten, sanitisierten) Crops;
+  erstes und letztes Sample oberhalb 25 % des Crop-Maximums. Die Raender des
+  Crops (Sicherheitsrand, Blockraster der Segmentierung) fallen damit weg.
+  Umrechnung: `t = startSampleFine / fs`.
+- Frequenz (Sub-Bin): leistungsgewichteter Schwerpunkt des In-Band-PSD
+  (Max-Hold-Detektionsspektrum, lineare Leistung) über den detektierten
+  Baendern, zyklisch ab `band.lo`; bei schmalen Tönen (CW) liegt der
+  Schwerpunkt auf der Tonbin, bei breiten Baendern in der Bandmitte.
+  Umrechnung: `f = centerFreqRefined * fs` (zyklisch in [0,1)).
+- `ModulationClassifier::extractPulse` extrahiert den Puls anschließend
+  direkt aus dem Originalpuffer: Zeitfenster `[startSampleFine,
+  startSampleFine + numSamplesFine)`, Bandmaske um `centerFreqRefined` mit
+  `bandwidthNorm` (über `BandExtractor::extract`, inkl. Wächter), IFFT und
+  Rückverschiebung auf die Bandmitte. `slice[k]` entspricht
+  `iq[startSampleFine + k] * e^{-j*2pi*f0*k}`.
+
 ## Phase 2: Merkmale
 
 Auf jedem (Band, Crop):
@@ -149,7 +170,7 @@ ist dort mit seiner Bedeutung kommentiert. Eine Änderung erfordert eine
 Die Referenzimplementierung führt die C++-Pipeline elementweise aus
 (äquivalente Arithmetik) und wurde gegen eine erweiterte Qualitätsmatrix
 aus 168 Szenarien gefahren. Die C++-Testsuite (tests/test_main.cpp,
-94 Szenarien) deckt den verifizierten robusten Bereich ab; jedes Szenario
+100 Szenarien) deckt den verifizierten robusten Bereich ab; jedes Szenario
 der Suite wurde in der Referenz über mindestens drei Seeds bestätigt.
 
 - Basiskalibrierung, SNR 20 dB, sps 8: 9/9 korrekt (BPSK, QPSK, FSK2,

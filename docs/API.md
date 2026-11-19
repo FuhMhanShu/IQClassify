@@ -30,9 +30,12 @@ Ergebnis je erkanntem Puls:
 
 | Feld | Typ | Bedeutung |
 |---|---|---|
-| startSample | size_t | erstes Sample des Pulses im Puffer |
-| numSamples | size_t | Pulslänge in Samples |
-| centerFreqNorm | float | Bandmitte, fraktional, zyklisch in [0,1) |
+| startSample | size_t | erstes Sample des Pulses im Puffer (Blockraster) |
+| numSamples | size_t | Pulslänge in Samples (Blockraster) |
+| startSampleFine | size_t | samplegenauer Pulsbeginn im Puffer (Wiederfinden) |
+| numSamplesFine | size_t | samplegenaue Pulslänge (Wiederfinden) |
+| centerFreqNorm | float | Bandmitte auf dem FFT-Raster, fraktional, zyklisch in [0,1) |
+| centerFreqRefined | double | Sub-Bin-Mittenfrequenz (In-Band-Schwerpunkt), zyklisch in [0,1) |
 | bandwidthNorm | float | Bandbreite inkl. Masken-Wächter, fraktional |
 | snrDb | float | geschätzte Spektraldichte-SNR des Pulses |
 | coarse | CoarseClass | Stufe-1-Entscheidung |
@@ -56,6 +59,12 @@ Ergebnis je erkanntem Puls:
                                           std::size_t n) const;
         std::vector<PulseResult> classifyF(const std::complex<float>* iq,
                                            std::size_t n) const;
+        std::vector<std::complex<double>> extractPulse(
+            const std::complex<double>* iq, std::size_t n,
+            const PulseResult& pulse) const;
+        std::vector<std::complex<float>> extractPulseF(
+            const std::complex<float>* iq, std::size_t n,
+            const PulseResult& pulse) const;
         const ClassifierConfig& config() const;
     };
 
@@ -72,6 +81,21 @@ Ergebnis je erkanntem Puls:
   single-threaded).
 - `classifyF` konvertiert die Eingabe nach double; die interne Rechnung
   bleibt doppelpräzise.
+- Lokalisierung (Wiederfinden im IQ-Signal): jedes `PulseResult` trägt
+  neben dem groben Blockraster-Fenster (`startSample`/`numSamples`) das
+  samplegenaue Zeitfenster (`startSampleFine`/`numSamplesFine`) und die
+  Sub-Bin-Mittenfrequenz (`centerFreqRefined`). Umrechnung in
+  physikalische Einheiten: `t = startSampleFine / fs`,
+  `f = centerFreqRefined * fs` (zyklisch; negative Frequenzen erscheinen
+  als Werte nahe 1).
+- `extractPulse`/`extractPulseF` liefern den Basisband-Slice eines
+  klassifizierten Pulses aus dem Puffer: Zeitfenster
+  `[startSampleFine, startSampleFine + numSamplesFine)`, Bandpass um
+  `centerFreqRefined` mit `bandwidthNorm`. `slice[k]` entspricht
+  `iq[startSampleFine + k]`, frequenzverschoben auf die Pulsmitte
+  (Rückverschiebung: `slice[k] * e^{+j*2pi*centerFreqRefined*k}`).
+  Nullzeiger, leere Eingabe oder ein Puls außerhalb des Puffers liefern
+  ein leeres Ergebnis.
 
 ## ClassifierConfig
 
@@ -97,6 +121,13 @@ gegen die Testsuite.
                     p.startSample,
                     iqclassify::toString(p.modulation),
                     p.snrDb, p.confidence);
+        // Puls zeitlich/frequenztechnisch wiederfinden:
+        std::printf("  fein: Samples [%zu, %zu), f = %.6f * fs\n",
+                    p.startSampleFine,
+                    p.startSampleFine + p.numSamplesFine,
+                    p.centerFreqRefined);
+        auto slice = clf.extractPulseF(iq.data(), iq.size(), p);
+        // slice[k] == iq[startSampleFine + k], auf die Pulsmitte verschoben
     }
 
 ## Schwellwerte anpassen

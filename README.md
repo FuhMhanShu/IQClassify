@@ -19,9 +19,13 @@ klassifiziert die Modulationsart jedes Pulses in zwei Stufen:
 - Interne Rechnung in Doppelpraezision; Eingabe als `float` oder `double`.
 - Mehrere Pulse pro Puffer: zeitlich getrennt und gleichzeitig in
   verschiedenen Frequenzbaendern.
+- Lokalisierung: jeder detektierte Puls wird mit samplegenauer Zeitlage
+  (`startSampleFine`/`numSamplesFine`) und Sub-Bin-Mittenfrequenz
+  (`centerFreqRefined`) ausgegeben; `extractPulse` liefert den Puls als
+  Basisband-Slice direkt aus dem IQ-Puffer (Wiederfinden im Signal).
 - Klassenkapselung: eine Fassade (`ModulationClassifier`), alle
   Schwellwerte konfigurierbar (`ClassifierConfig`).
-- Deterministische Testsuite ohne externes Testframework: 94 Szenarien
+- Deterministische Testsuite ohne externes Testframework: 100 Szenarien
   aus der Qualitaetsmatrix (SNR-Raster, Oversampling, Frequenzlagen,
   Chirp-Varianten, Pulslaengen, Mehrpuls, Seed-Streuung) plus
   Haertungsfaelle (Nullzeiger, leere und NaN-beladene Eingaben,
@@ -59,6 +63,11 @@ Einbindung in ein qmake-Konsumentenprojekt:
     std::vector<std::complex<float>> iq = /* ... */;
     for (const auto& pulse : clf.classifyF(iq.data(), iq.size())) {
         // pulse.modulation, pulse.confidence, pulse.centerFreqNorm, ...
+        // Puls zeitlich/frequenztechnisch wiederfinden (fs = 1 normiert):
+        //   t0 = pulse.startSampleFine, len = pulse.numSamplesFine,
+        //   f0 = pulse.centerFreqRefined
+        auto slice = clf.extractPulseF(iq.data(), iq.size(), pulse);
+        // slice[k] == iq[pulse.startSampleFine + k], auf f0 verschoben
     }
 
 Alle Frequenzen sind auf die Abtastrate normiert (fs = 1).

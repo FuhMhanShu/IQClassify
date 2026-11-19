@@ -47,6 +47,15 @@ struct PulseResult {
     float centerFreqNorm = 0.0f;  // Bandmitte, fraktional, in [0,1) (zyklisch)
     float bandwidthNorm = 0.0f;   // Bandbreite inkl. Masken-Waechter, fraktional
     float snrDb = 0.0f;           // geschaetzte Spektraldichte-SNR des Pulses
+
+    // Feine Lage des Pulses im IQ-Puffer (zum Wiederfinden):
+    // startSampleFine/numSamplesFine sind samplegenau (Huellkurven-Schwelle
+    // im Crop), centerFreqRefined ist die Sub-Bin-Mittenfrequenz
+    // (leistungsgewichteter Schwerpunkt des In-Band-PSD), zyklisch [0,1).
+    // Umrechnung: t = startSampleFine / fs, f = centerFreqRefined * fs.
+    std::size_t startSampleFine = 0;  // samplegenauer Pulsbeginn im Puffer
+    std::size_t numSamplesFine = 0;   // samplegenaue Pulslaenge
+    double centerFreqRefined = 0.0;   // Sub-Bin-Mittenfrequenz, zyklisch [0,1)
     CoarseClass coarse = CoarseClass::Unknown;   // Stufe-1-Entscheidung
     ModulationType modulation = ModulationType::Unknown;  // Stufe-2-Entscheidung
     float confidence = 0.0f;      // Konfidenz der Stufe-2-Entscheidung [0,1]

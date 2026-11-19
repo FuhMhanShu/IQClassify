@@ -16,6 +16,9 @@
 //  11. Haertung: Nullzeiger, leere/miniature Eingaben, reines Rauschen,
 //      Nullen-, DC-, NaN- und Inf-Eingaben, Dropouts,.float-Pfad,
 //      kurzer CW-Puls
+//  12. Lokalisierung: samplegenaue Zeitlage + Sub-Bin-Frequenz der
+//      detektierten Pulse (QPSK/CW/Chirp/FSK2/OFDM, 2-Puls-Szene) und
+//      extractPulse/extractPulseF (Wiederfinden im IQ-Puffer)
 //
 // Ein Szenario besteht genau dann den Test, wenn die sortierte Labelmenge
 // der erkannten Pulse der erwarteten entspricht. Fuer
@@ -50,10 +53,20 @@ std::string joinLabels(std::vector<std::string> labels) {
 
 void printPulse(const iqclassify::PulseResult& r) {
     std::printf("        start=%zu n=%zu fc=%.5f bw=%.5f snr=%.1f "
-                "cv=%.3f papr=%.1f flat=%.2f modes=%d conf=%.2f\n",
+                "cv=%.3f papr=%.1f flat=%.2f modes=%d conf=%.2f "
+                "fine=[%zu,+%zu) fcRef=%.6f\n",
                 r.startSample, r.numSamples, r.centerFreqNorm,
                 r.bandwidthNorm, r.snrDb, r.envelopeCv, r.paprWindowedDb,
-                r.spectralFlatnessDb, r.freqModes, r.confidence);
+                r.spectralFlatnessDb, r.freqModes, r.confidence,
+                r.startSampleFine, r.numSamplesFine, r.centerFreqRefined);
+}
+
+// Zyklischer Abstand zweier normierter Frequenzen in [0,1).
+double cycDist(double a, double b) {
+    double d = std::fmod(a - b, 1.0);
+    if (d > 0.5) d -= 1.0;
+    if (d < -0.5) d += 1.0;
+    return std::abs(d);
 }
 
 bool scenario(const char* name, const std::vector<iqtest::cd>& buf,
@@ -76,6 +89,101 @@ bool scenario(const char* name, const std::vector<iqtest::cd>& buf,
     } else {
         std::printf("[FAIL] %-24s expect=%-24s got=%-24s n_pulses=%zu\n",
                     name, expect.c_str(), got.c_str(), res.size());
+        for (const auto& r : res) printPulse(r);
+    }
+    return ok;
+}
+
+// Lokalisierungs-Szenario: ein einzelner Puls an bekannter Position.
+// Prueft feine Zeitlage, Sub-Bin-Frequenz und extractPulse (Wiederfinden
+// des Pulses im IQ-Puffer).
+bool scenarioLocate(const char* name, const std::vector<iqtest::cd>& buf,
+                    const char* expectLabel, double trueFc,
+                    std::size_t trueAt, std::size_t trueLen) {
+    ++g_total;
+    iqclassify::ClassifierConfig cfg;
+    iqclassify::ModulationClassifier clf(cfg);
+    const std::vector<iqclassify::PulseResult> res =
+        clf.classify(buf.data(), buf.size());
+    bool ok = res.size() == 1 &&
+              std::string(iqclassify::toString(res[0].modulation)) ==
+                  expectLabel;
+    if (ok) {
+        const iqclassify::PulseResult& p = res[0];
+        const double fd = cycDist(p.centerFreqRefined, trueFc);
+        const std::ptrdiff_t sd = static_cast<std::ptrdiff_t>(
+                                      p.startSampleFine) -
+                                  static_cast<std::ptrdiff_t>(trueAt);
+        const std::ptrdiff_t ld = static_cast<std::ptrdiff_t>(
+                                      p.numSamplesFine) -
+                                  static_cast<std::ptrdiff_t>(trueLen);
+        const bool inRange = p.centerFreqRefined >= 0.0 &&
+                             p.centerFreqRefined < 1.0;
+        ok = fd <= 0.01 && inRange && std::abs(sd) <= 160 &&
+             std::abs(ld) <= 320;
+        // extractPulse: Slice deckt das feine Fenster, behaelt den Grossteil
+        // der Energie und liegt spektral auf DC (Basisband).
+        const std::vector<std::complex<double>> slice =
+            clf.extractPulse(buf.data(), buf.size(), p);
+        double eSlice = 0.0;
+        for (const auto& v : slice) eSlice += std::norm(v);
+        double eRaw = 0.0;
+        for (std::size_t i = p.startSampleFine;
+             i < p.startSampleFine + p.numSamplesFine && i < buf.size();
+             ++i)
+            eRaw += std::norm(buf[i]);
+        bool exOk = slice.size() == p.numSamplesFine && eRaw > 0.0 &&
+                    eSlice > 0.8 * eRaw;
+        if (exOk && slice.size() >= 16) {
+            std::vector<iqclassify::detail::cd> sp = slice;
+            iqclassify::detail::fftInPlace(sp, false);
+            std::size_t am = 0;
+            double mv = -1.0;
+            for (std::size_t k = 0; k < sp.size(); ++k) {
+                const double v = std::norm(sp[k]);
+                if (v > mv) {
+                    mv = v;
+                    am = k;
+                }
+            }
+            double fpeak = static_cast<double>(am) /
+                           static_cast<double>(sp.size());
+            if (fpeak > 0.5) fpeak -= 1.0;
+            exOk = std::abs(fpeak) <= 0.5 * p.bandwidthNorm + 0.02;
+        }
+        // float-Pfad und Nullzeiger-Haertung von extractPulse
+        std::vector<std::complex<float>> fbuf(buf.size());
+        for (std::size_t i = 0; i < buf.size(); ++i)
+            fbuf[i] = std::complex<float>(static_cast<float>(buf[i].real()),
+                                          static_cast<float>(buf[i].imag()));
+        const std::vector<std::complex<float>> fslice =
+            clf.extractPulseF(fbuf.data(), fbuf.size(), p);
+        exOk = exOk && fslice.size() == p.numSamplesFine &&
+               clf.extractPulse(nullptr, 0, p).empty() &&
+               clf.extractPulseF(nullptr, 0, p).empty();
+        ok = ok && exOk;
+        if (ok) {
+            ++g_ok;
+            std::printf("[OK ] %-24s %s fine=[%zu,+%zu) fcRef=%.6f "
+                        "(true at=%zu fc=%.4f)\n",
+                        name, expectLabel, p.startSampleFine,
+                        p.numSamplesFine, p.centerFreqRefined, trueAt,
+                        trueFc);
+        } else {
+            std::printf("[FAIL] %-24s label=%s fine=[%zu,+%zu) fcRef=%.6f "
+                        "(true at=%zu len=%zu fc=%.4f) extract=%s\n",
+                        name,
+                        res.empty() ? "-"
+                                    : iqclassify::toString(res[0].modulation),
+                        res.empty() ? 0 : res[0].startSampleFine,
+                        res.empty() ? 0 : res[0].numSamplesFine,
+                        res.empty() ? 0.0 : res[0].centerFreqRefined, trueAt,
+                        trueLen, trueFc, exOk ? "ok" : "BAD");
+            for (const auto& r : res) printPulse(r);
+        }
+    } else {
+        std::printf("[FAIL] %-24s expect=%s got=%zu pulses\n", name,
+                    expectLabel, res.size());
         for (const auto& r : res) printPulse(r);
     }
     return ok;
@@ -216,11 +324,15 @@ int main() {
         scenario("overlap-qam16-bpsk", rec.buffer(), "BPSK/QAM16");
     }
     {
+        // QPSK und FSK2 gleichzeitig. Mittenabstand 0.30: FSK2 hat bei
+        // sps 8 eine halbe Bandbreite von ~0.145, QPSK ~0.075; bei
+        // Abstand 0.20 ueberlappen die halben Bandbreiten und die Baender
+        // sind nach dokumentierter Grenze (METHODOLOGY.md) nicht trennbar.
         std::mt19937 rng(12);
         iqtest::Recorder rec;
         rec.silence(2000);
-        rec.add(iqtest::genPsk(rng, 4, 400, 8), 0.10, 20.0, 2000);
-        rec.add(iqtest::genFsk2(rng, 400, 8), -0.10, 20.0, 2000);
+        rec.add(iqtest::genPsk(rng, 4, 400, 8), 0.15, 20.0, 2000);
+        rec.add(iqtest::genFsk2(rng, 400, 8), -0.15, 20.0, 2000);
         rec.silence(6000);
         scenario("overlap-qpsk-fsk2", rec.buffer(), "FSK2/QPSK");
     }
@@ -298,16 +410,18 @@ int main() {
             scenario(name, rec.buffer(), "QPSK");
 
             std::snprintf(name, sizeof(name), "freq%+.2f-cw", fc);
-            rec.silence(2000);
-            rec.add(iqtest::genCw(rng, 3000), fc, 20.0);
-            rec.silence(2000);
-            scenario(name, rec.buffer(), "Unmodulated");
+            iqtest::Recorder recCw;
+            recCw.silence(2000);
+            recCw.add(iqtest::genCw(rng, 3000), fc, 20.0);
+            recCw.silence(2000);
+            scenario(name, recCw.buffer(), "Unmodulated");
 
             std::snprintf(name, sizeof(name), "freq%+.2f-chirp", fc);
-            rec.silence(2000);
-            rec.add(iqtest::genChirp(4000, 0.25), fc, 20.0);
-            rec.silence(2000);
-            scenario(name, rec.buffer(), "Chirp");
+            iqtest::Recorder recChirp;
+            recChirp.silence(2000);
+            recChirp.add(iqtest::genChirp(4000, 0.25), fc, 20.0);
+            recChirp.silence(2000);
+            scenario(name, recChirp.buffer(), "Chirp");
         }
     }
     // 8. Chirp-Varianten
@@ -491,6 +605,110 @@ int main() {
             rec.add(iqtest::genCw(rng, 1000), 0.15, 20.0);
             rec.silence(2000);
             scenario("cw-short-1000", rec.buffer(), "Unmodulated");
+        }
+    }
+    // 12. Lokalisierung: detektierte Pulse zeitlich (samplegenau) und
+    //     frequenztechnisch (Sub-Bin) im IQ-Signal wiederfinden
+    {
+        std::mt19937 rng(500);
+        iqtest::Recorder rec;
+        rec.silence(2000);
+        rec.add(iqtest::genPsk(rng, 4, 400, 8), 0.15, 20.0);
+        rec.silence(2000);
+        scenarioLocate("locate-qpsk", rec.buffer(), "QPSK", 0.15, 2000,
+                       3200);
+    }
+    {
+        std::mt19937 rng(501);
+        iqtest::Recorder rec;
+        rec.silence(3000);
+        rec.add(iqtest::genCw(rng, 2500), -0.20, 20.0);
+        rec.silence(2000);
+        scenarioLocate("locate-cw-neg-fc", rec.buffer(), "Unmodulated",
+                       -0.20, 3000, 2500);
+    }
+    {
+        std::mt19937 rng(503);
+        iqtest::Recorder rec;
+        rec.silence(2000);
+        rec.add(iqtest::genChirp(4000, 0.25), 0.05, 20.0);
+        rec.silence(2000);
+        scenarioLocate("locate-chirp", rec.buffer(), "Chirp", 0.05, 2000,
+                       4000);
+    }
+    {
+        std::mt19937 rng(504);
+        iqtest::Recorder rec;
+        rec.silence(2000);
+        rec.add(iqtest::genFsk2(rng, 400, 8), 0.20, 20.0);
+        rec.silence(2000);
+        scenarioLocate("locate-fsk2", rec.buffer(), "FSK2", 0.20, 2000,
+                       3200);
+    }
+    {
+        std::mt19937 rng(505);
+        iqtest::Recorder rec;
+        rec.silence(2000);
+        rec.add(iqtest::genOfdm(rng, 256, 64, 40, 0.3), -0.15, 20.0);
+        rec.silence(2000);
+        scenarioLocate("locate-ofdm", rec.buffer(), "OFDM", -0.15, 2000,
+                       40 * 320);
+    }
+    {
+        // zwei sequenzielle Pulse: beide muessen lokalisierbar sein,
+        // die feinen Fenster duerfen sich nicht ueberlappen und muessen
+        // den jeweiligen wahren Puls zu >= 80 % enthalten.
+        std::mt19937 rng(502);
+        iqtest::Recorder rec;
+        rec.silence(2000);
+        rec.add(iqtest::genPsk(rng, 2, 300, 8), 0.10, 20.0);  // [2000,4400)
+        rec.silence(2500);
+        rec.add(iqtest::genCw(rng, 2000), -0.15, 20.0);       // [6900,8900)
+        rec.silence(2000);
+        ++g_total;
+        iqclassify::ClassifierConfig cfg;
+        iqclassify::ModulationClassifier clf(cfg);
+        const std::vector<iqclassify::PulseResult> res =
+            clf.classify(rec.buffer().data(), rec.buffer().size());
+        bool ok = res.size() == 2;
+        if (ok) {
+            std::vector<iqclassify::PulseResult> sorted = res;
+            std::sort(sorted.begin(), sorted.end(),
+                      [](const iqclassify::PulseResult& a,
+                         const iqclassify::PulseResult& b) {
+                          return a.startSampleFine < b.startSampleFine;
+                      });
+            const auto& res2 = sorted;
+            const std::pair<double, std::pair<std::size_t, std::size_t>>
+                truth[2] = {{0.10, {2000, 4400}}, {-0.15, {6900, 8900}}};
+            for (std::size_t i = 0; i < 2 && ok; ++i) {
+                const iqclassify::PulseResult& p = res2[i];
+                const double fd = cycDist(p.centerFreqRefined, truth[i].first);
+                const std::size_t lo = std::max(p.startSampleFine,
+                                                truth[i].second.first);
+                const std::size_t hi = std::min(
+                    p.startSampleFine + p.numSamplesFine,
+                    truth[i].second.second);
+                const double cover =
+                    hi > lo ? static_cast<double>(hi - lo) /
+                                  static_cast<double>(
+                                      truth[i].second.second -
+                                      truth[i].second.first)
+                            : 0.0;
+                ok = fd <= 0.01 && cover >= 0.8;
+            }
+            ok = ok && res2[0].startSampleFine + res2[0].numSamplesFine <=
+                           res2[1].startSampleFine;
+        }
+        if (ok) {
+            ++g_ok;
+            std::printf("[OK ] %-24s 2 Pulse lokalisiert, Fenster "
+                        "disjunkt\n",
+                        "locate-2pulses");
+        } else {
+            std::printf("[FAIL] %-24s n_pulses=%zu\n", "locate-2pulses",
+                        res.size());
+            for (const auto& r : res) printPulse(r);
         }
     }
     std::printf("\nscore: %d/%d\n", g_ok, g_total);
