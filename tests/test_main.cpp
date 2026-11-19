@@ -28,6 +28,8 @@
 //  16. Spektrale Kanalisierung (erster Pipelineschritt): adaptive Kanaele um
 //      die Energiebereiche, Extract/Mix/Resample je Kanal, Aequivalenz zum
 //      Legacy-Pfad, Resampling in classify, breiter Chirp bleibt ein Puls
+//  17. Skalierung/Performance: 2 Mio Samples in einem Durchlauf klassifizieren
+//      (Laufzeit wird ausgegeben, nur gegen Pathologien abgesichert)
 //
 // Ein Szenario besteht genau dann den Test, wenn die sortierte Labelmenge
 // der erkannten Pulse der erwarteten entspricht. Fuer
@@ -35,6 +37,7 @@
 // Bedeutungslosigkeit der Eingabe exakt keine Pulse.
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -1349,6 +1352,42 @@ int main() {
                             res.size());
                 for (const auto& r : res) printPulse(r);
             }
+        }
+    }
+    // 17. Skalierung: 2 Mio Samples, 3 Pulse sequenziell -> ein classify-Lauf.
+    {
+        ++g_total;
+        std::mt19937 rng(20240607);
+        iqtest::Recorder rec;
+        rec.silence(2000000);
+        rec.add(iqtest::genPsk(rng, 4, 400, 8), 0.15, 20.0, 200000);
+        rec.add(iqtest::genCw(rng, 3000), -0.20, 20.0, 900000);
+        rec.add(iqtest::genFsk2(rng, 400, 8), 0.05, 20.0, 1600000);
+        const std::vector<iqtest::cd>& buf = rec.buffer();
+        iqclassify::ClassifierConfig cfg;
+        iqclassify::ModulationClassifier clf(cfg);
+        const auto t0 = std::chrono::steady_clock::now();
+        const auto res = clf.classify(buf.data(), buf.size());
+        const double ms =
+            std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t0)
+                .count();
+        std::vector<std::string> l;
+        for (const auto& r : res)
+            l.push_back(iqclassify::toString(r.modulation));
+        const std::string got = joinLabels(l);
+        // Laufzeit nur gegen Pathologien absichern (CI-Rechner variieren).
+        const bool ok = got == "FSK2/QPSK/Unmodulated" && res.size() == 3 &&
+                        ms < 120000.0;
+        if (ok) {
+            ++g_ok;
+            std::printf("[OK ] %-24s n=%zu -> %s in %.0f ms (%.2f MS/s)\n",
+                        "scale-2M", buf.size(), got.c_str(), ms,
+                        buf.size() / 1e6 / (ms / 1e3));
+        } else {
+            std::printf("[FAIL] %-24s got=%s n=%zu ms=%.0f\n", "scale-2M",
+                        got.c_str(), res.size(), ms);
+            for (const auto& r : res) printPulse(r);
         }
     }
     std::printf("\nscore: %d/%d\n", g_ok, g_total);

@@ -253,7 +253,7 @@ ist dort mit seiner Bedeutung kommentiert. Eine Änderung erfordert eine
 Die Referenzimplementierung führt die C++-Pipeline elementweise aus
 (äquivalente Arithmetik) und wurde gegen eine erweiterte Qualitätsmatrix
 aus 168 Szenarien gefahren. Die C++-Testsuite (tests/test_main.cpp,
-125 Szenarien) deckt den verifizierten robusten Bereich ab; jedes Szenario
+126 Szenarien) deckt den verifizierten robusten Bereich ab; jedes Szenario
 der Suite wurde in der Referenz über mindestens drei Seeds bestätigt.
 
 - Basiskalibrierung, SNR 20 dB, sps 8: 9/9 korrekt (BPSK, QPSK, FSK2,
@@ -294,6 +294,8 @@ der Suite wurde in der Referenz über mindestens drei Seeds bestätigt.
   kanalisierten Default-Pfads identisch zum Legacy-Pfad, Resampling in
   classify (channelDecimate=2) ohne Labeländerung, breiter Chirp
   (Hub 0.40) bleibt ein einziger Puls.
+- Skalierung (Abschnitt 17): 2 Mio Samples mit 3 Pulsen in einem classify-
+  Durchlauf korrekt klassifiziert (~4 MSamples/s, siehe docs/PERFORMANCE.md).
 - Härtungsfälle: Nullzeiger, leere und Miniatureingaben, reines Rauschen,
   Null- und DC-Puffer, vollständig NaN-/Inf-beladene Puffer sowie
   NaN-/Inf-/Null-Dropouts mitten in einem Puls: definierte Ergebnisse,

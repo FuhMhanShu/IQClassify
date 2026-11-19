@@ -57,6 +57,15 @@ if(IQCLASSIFY_BUILD_TOOLS)
         ${CMAKE_CURRENT_SOURCE_DIR}/tools
         ${CMAKE_CURRENT_SOURCE_DIR}/tests)
     target_link_libraries(iqclassify_readme_images PRIVATE IQClassify)
+
+    # Performance-Benchmark: ./build/iqclassify_benchmark
+    add_executable(iqclassify_benchmark
+        tools/benchmark.cpp
+        tests/SignalGenerator.cpp)
+    target_include_directories(iqclassify_benchmark PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tools
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+    target_link_libraries(iqclassify_benchmark PRIVATE IQClassify)
 endif()
 
 # Installations-Support (optional)
