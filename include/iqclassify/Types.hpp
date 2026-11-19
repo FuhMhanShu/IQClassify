@@ -8,8 +8,10 @@
 
 #pragma once
 
+#include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace iqclassify {
 
@@ -69,6 +71,56 @@ struct PulseResult {
     int freqModes = 0;             // Anzahl dominanter f_inst-Moden
     float spectralFlatnessDb = 0.0f; // Standardabweichung der in-band-PSD
     std::size_t bandBins = 0;      // Breite des detektierten Bandes (FFT-Bins)
+};
+
+// PSK-Synchronisation eines erkannten PSK-Pulses. Alle Schaetzungen sind
+// batchweise ueber den ganzen Puls (Spektrallinien + gewichtete Regression),
+// es gibt keine Regelschleife (kein PLL/Clock-Synchronizer) und damit keinen
+// Einschwingvorgang; die Symbole am Pulsanfang sind sofort korrekt.
+struct PskSync {
+    bool valid = false;
+    double sps = 0.0;                  // Samples pro Symbol
+    double timingOffset = 0.0;         // erste Symbolzeit relativ zu
+                                       // startSampleFine, in [0, sps)
+    double carrierFreqNorm = 0.0;      // Traegerfrequenz des Pulses, zyklisch [0,1)
+    double carrierPhaseAtStart = 0.0;  // Traegerphase am Pulsanfang
+                                       // (startSampleFine), rad, auf das M-PSK-
+                                       // Raster aufgeloest (Restambiguität 2pi/M)
+    double snrDb = 0.0;
+    std::vector<std::complex<double>> symbols;  // derotierte, normierte Symbole
+};
+
+// Alle Parameter eines erkannten Chirp-Pulses.
+struct ChirpParams {
+    bool valid = false;
+    std::size_t startSample = 0;   // Pulsanfang im Puffer (startSampleFine)
+    std::size_t numSamples = 0;    // Pulslaenge (numSamplesFine)
+    double fStartNorm = 0.0;       // Frequenz am Pulsanfang, zyklisch [0,1)
+    double fEndNorm = 0.0;         // Frequenz am Pulsende, zyklisch [0,1)
+    double centerFreqNorm = 0.0;   // Mittenfrequenz
+    double bandwidthNorm = 0.0;    // |fEnd - fStart| (Hub)
+    double slopeNorm = 0.0;        // Frequenzhub pro Sample^2 (Vorzeichen =
+                                   // Richtung; in Hz/s: slopeNorm * fs^2)
+    double snrDb = 0.0;
+    double r2 = 0.0;               // Bestimmtheitsmass des linearen Chirp-Fits
+    bool up = true;                // true = aufwaerts, false = abwaerts
+};
+
+// Symbol-Schnittstelle fuer PSK- und FSK-Pulse (Symbolextraktion).
+// PSK (BPSK/QPSK): symbols gefuellt (derotiert auf das M-PSK-Raster,
+// carrierFreqNorm/carrierPhaseAtStart synchronisieren den Pulsanfang).
+// FSK (FSK2): symbolFreqs gefuellt (Mittenfrequenz pro Symbol relativ zur
+// Pulsmitte) und fskTone (0/1-Entscheidung je Symbol).
+struct SymbolStream {
+    bool valid = false;
+    ModulationType type = ModulationType::Unknown;
+    double sps = 0.0;                  // Samples pro Symbol
+    double timingOffset = 0.0;         // erste Symbolzeit relativ zu startSampleFine
+    double carrierFreqNorm = 0.0;      // PSK: Traeger [0,1); FSK: Pulsmitte
+    double carrierPhaseAtStart = 0.0;  // PSK: Phase am Pulsanfang (rad)
+    std::vector<std::complex<double>> symbols;  // PSK: Symbole
+    std::vector<double> symbolFreqs;            // FSK: Frequenz pro Symbol
+    std::vector<int> fskTone;                   // FSK2: Ton 0/1 pro Symbol
 };
 
 }  // namespace iqclassify

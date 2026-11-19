@@ -56,6 +56,30 @@ public:
         const std::complex<float>* iq, std::size_t n,
         const PulseResult& pulse) const;
 
+    // PSK-Puls phasenrichtig aufsynchronisieren: Traegerfrequenz/-phase am
+    // Pulsanfang (startSampleFine), Symboltakt (sps, timingOffset) und die
+    // derotierten Symbole. Batch-Schaetzung ueber den ganzen Puls, daher
+    // kein Einschwingvorgang eines Clock-Synchronizers. Nur fuer BPSK/QPSK.
+    PskSync synchronizePsk(const std::complex<double>* iq, std::size_t n,
+                           const PulseResult& pulse) const;
+    PskSync synchronizePskF(const std::complex<float>* iq, std::size_t n,
+                            const PulseResult& pulse) const;
+
+    // Alle Parameter eines erkannten Chirp-Pulses (Anfang/Ende, Frequenz
+    // am Anfang/Ende, Hub, Steigung, Richtung, R^2, SNR). Nur fuer Chirp.
+    ChirpParams analyzeChirp(const std::complex<double>* iq, std::size_t n,
+                             const PulseResult& pulse) const;
+    ChirpParams analyzeChirpF(const std::complex<float>* iq, std::size_t n,
+                              const PulseResult& pulse) const;
+
+    // Symbol-Schnittstelle fuer PSK und FSK: liefert Symboltakt und Symbole
+    // (PSK) bzw. Frequenz/Ton-Entscheidung pro Symbol (FSK2). Fuer andere
+    // Modulationen ist valid == false.
+    SymbolStream extractSymbols(const std::complex<double>* iq, std::size_t n,
+                                const PulseResult& pulse) const;
+    SymbolStream extractSymbolsF(const std::complex<float>* iq, std::size_t n,
+                                 const PulseResult& pulse) const;
+
     const ClassifierConfig& config() const { return cfg_; }
 
 private:

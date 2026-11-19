@@ -399,7 +399,7 @@ void renderDetection(const Demo& d, const std::string& outDir) {
     c.text(20, 12, "DETEKTION UND LOKALISIERUNG (DEMO-PUFFER, SNR 20 DB, FS = 1)", 2, black);
     c.hline(20, W - 20, 38, gray);
 
-    const int ml = 90, mr = 30, mt = 60, mb = 40;
+    const int ml = 90, mr = 30, mt = 60;
     const int pw = W - ml - mr;  // 1040
 
     // ---- oberes Panel: Huellkurve ----

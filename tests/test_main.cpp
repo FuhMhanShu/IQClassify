@@ -21,6 +21,10 @@
 //      extractPulse/extractPulseF (Wiederfinden im IQ-Puffer)
 //  13. Amplitudenschwankende Pulse: Fade-Merge (ein Puls bleibt ein Puls),
 //      korrekte Klassifikation und Lokalisierung trotz schwankender Amplitude
+//  14. Low-SNR bis 2 dB: lange Pulse werden erkannt, lokalisiert und
+//      klassifiziert (Default-Gate minSnrDb=2, Low-SNR-Bruecke im Banddetektor)
+//  15. Analyse-API: PSK-Synchronisation (phasenrichtiger Pulsanfang ohne
+//      Clocksync-Einschwingen), Chirp-Parameter, Symbol-Schnittstelle PSK/FSK
 //
 // Ein Szenario besteht genau dann den Test, wenn die sortierte Labelmenge
 // der erkannten Pulse der erwarteten entspricht. Fuer
@@ -68,6 +72,24 @@ double cycDist(double a, double b) {
     double d = std::fmod(a - b, 1.0);
     if (d > 0.5) d -= 1.0;
     if (d < -0.5) d += 1.0;
+    return std::abs(d);
+}
+
+// Winkeldistanz in [-pi, pi).
+double wrapPi(double a) {
+    a = std::fmod(a, 2.0 * M_PI);
+    if (a > M_PI) a -= 2.0 * M_PI;
+    if (a < -M_PI) a += 2.0 * M_PI;
+    return a;
+}
+
+// Winkeldistanz modulo des M-PSK-Rasters 2*pi/M (Restambiguität).
+double modGridDist(double a, double b, int M) {
+    double d = wrapPi(a - b);
+    const double g = 2.0 * M_PI / M;
+    d = std::fmod(d, g);
+    if (d > g / 2) d -= g;
+    if (d < -g / 2) d += g;
     return std::abs(d);
 }
 
@@ -782,6 +804,375 @@ int main() {
                 0.10, 20.0);
         rec.silence(2000);
         scenario("fade-bpsk-ramp", rec.buffer(), "BPSK");
+    }
+    // 14. Low-SNR (bis 2 dB): lange Pulse (mehr Symbole/Energie) werden
+    //     erkannt, lokalisiert und klassifiziert; Default-Gate minSnrDb=2.
+    {
+        // Hilfspruefung: genau ein Puls, korrekte Frequenzlage und Zeitlage.
+        auto lowSnrCheck = [](const char* name,
+                              const std::vector<iqtest::cd>& buf,
+                              const char* expectLabel, double trueFc,
+                              std::size_t trueAt) {
+            ++g_total;
+            iqclassify::ClassifierConfig cfg;
+            iqclassify::ModulationClassifier clf(cfg);
+            const auto res = clf.classify(buf.data(), buf.size());
+            bool ok = res.size() == 1 &&
+                      std::string(iqclassify::toString(res[0].modulation)) ==
+                          expectLabel &&
+                      cycDist(res[0].centerFreqRefined, trueFc) <= 0.02 &&
+                      std::abs(static_cast<std::ptrdiff_t>(
+                                   res[0].startSampleFine) -
+                               static_cast<std::ptrdiff_t>(trueAt)) <= 200;
+            if (ok) {
+                ++g_ok;
+                std::printf("[OK ] %-24s %s f=%.4f @%zu (snr est %.1f dB)\n",
+                            name, expectLabel, res[0].centerFreqRefined,
+                            res[0].startSampleFine, res[0].snrDb);
+            } else {
+                std::printf("[FAIL] %-24s expect=%s@%.3f/%zu got n=%zu\n", name,
+                            expectLabel, trueFc, trueAt, res.size());
+                for (const auto& r : res) printPulse(r);
+            }
+            return ok;
+        };
+        {
+            std::mt19937 rng(810);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genCw(rng, 8000), 0.20, 2.0);
+            rec.silence(2500);
+            lowSnrCheck("lowsnr-cw-2dB", rec.buffer(), "Unmodulated", 0.20,
+                        2000);
+        }
+        {
+            std::mt19937 rng(811);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genChirp(4000, 0.25), -0.10, 2.0);
+            rec.silence(2500);
+            lowSnrCheck("lowsnr-chirp-2dB", rec.buffer(), "Chirp", -0.10,
+                        2000);
+        }
+        {
+            std::mt19937 rng(813);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genPsk(rng, 4, 1000, 8), 0.15, 2.0);
+            rec.silence(2500);
+            lowSnrCheck("lowsnr-qpsk-2dB", rec.buffer(), "QPSK", 0.15, 2000);
+        }
+        {
+            std::mt19937 rng(813);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genPsk(rng, 2, 1000, 8), 0.10, 2.0);
+            rec.silence(2500);
+            lowSnrCheck("lowsnr-bpsk-2dB", rec.buffer(), "BPSK", 0.10, 2000);
+        }
+        {
+            std::mt19937 rng(817);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genQam(rng, 16, 2000, 8), 0.07, 4.0);
+            rec.silence(2500);
+            lowSnrCheck("lowsnr-qam16-4dB", rec.buffer(), "QAM16", 0.07,
+                        2000);
+        }
+        {
+            // zwei Pulse bei niedrigem SNR in getrennten Baendern
+            std::mt19937 rng(815);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genCw(rng, 6000), 0.25, 3.0, 2000);
+            rec.add(iqtest::genPsk(rng, 4, 800, 8), -0.20, 5.0, 2000);
+            rec.silence(6000);
+            scenario("lowsnr-2pulses", rec.buffer(), "QPSK/Unmodulated");
+        }
+    }
+    // 15. Analyse-API: PSK-Synchronisation (phasenrichtiger Pulsanfang),
+    //     Chirp-Parameter, Symbol-Schnittstelle (PSK/FSK)
+    {
+        // PSK-Signal mit bekanntem Traeger fc und Startphase phi0 aufbauen.
+        auto makePsk = [](int m, int seed, double fc, double phi0,
+                          std::size_t nsym, int sps) {
+            std::mt19937 rng(seed);
+            const std::vector<iqtest::cd> psk =
+                iqtest::genPsk(rng, m, nsym, sps);
+            std::vector<iqtest::cd> x(psk.size());
+            for (std::size_t i = 0; i < psk.size(); ++i) {
+                const double ph =
+                    2.0 * M_PI * fc * static_cast<double>(2000 + i) + phi0;
+                x[i] = psk[i] * iqtest::cd(std::cos(ph), std::sin(ph));
+            }
+            return x;
+        };
+        // Phasen-Faltung: Konzentration der M-ten Potenz der Symbole.
+        // Liegt nahe 1, wenn alle Symbole phasenrichtig auf dem M-PSK-Raster
+        // liegen (unabhaengig von etwa durch das MF-Gate verworfenen Symbolen).
+        auto foldConc = [](const std::vector<std::complex<double>>& syms,
+                           int m) {
+            if (syms.empty())
+                return 0.0;
+            std::complex<double> acc(0.0, 0.0);
+            for (const auto& v : syms) {
+                std::complex<double> p = v;
+                for (int i = 1; i < m; ++i)
+                    p *= v;
+                acc += p;
+            }
+            return std::abs(acc) / static_cast<double>(syms.size());
+        };
+        // PSK-Synchronisation: BPSK und QPSK mit bekanntem Traeger/Phase.
+        for (int mc = 0; mc < 2; ++mc) {
+            const int m = mc == 0 ? 2 : 4;
+            const char* label = mc == 0 ? "BPSK" : "QPSK";
+            const char* name = mc == 0 ? "sync-bpsk" : "sync-qpsk";
+            const double fc = mc == 0 ? 0.12 : -0.08;
+            const double phi0 = mc == 0 ? 0.7 : -1.1;
+            const int seed = mc == 0 ? 4242 : 777;
+            std::vector<iqtest::cd> x = makePsk(m, seed, fc, phi0, 400, 8);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(x, 0.0, 20.0, 2000);
+            rec.silence(2000);
+            ++g_total;
+            iqclassify::ClassifierConfig cfg;
+            iqclassify::ModulationClassifier clf(cfg);
+            const auto res =
+                clf.classify(rec.buffer().data(), rec.buffer().size());
+            bool ok = res.size() == 1 &&
+                      std::string(iqclassify::toString(res[0].modulation)) ==
+                          label;
+            if (ok) {
+                const iqclassify::PskSync s =
+                    clf.synchronizePsk(rec.buffer().data(),
+                                       rec.buffer().size(), res[0]);
+                const double expectedPhi =
+                    phi0 + 2.0 * M_PI * fc *
+                               static_cast<double>(res[0].startSampleFine);
+                const double phiErr =
+                    modGridDist(s.carrierPhaseAtStart, expectedPhi, m);
+                const double fold = foldConc(s.symbols, m);
+                ok = s.valid && std::abs(s.sps - 8.0) < 0.6 &&
+                     s.timingOffset >= 0.0 && s.timingOffset < s.sps &&
+                     cycDist(s.carrierFreqNorm, fc) < 0.01 && phiErr < 0.35 &&
+                     s.symbols.size() >= 300 && fold > 0.9;
+                if (ok) {
+                    ++g_ok;
+                    std::printf("[OK ] %-24s sps=%.2f fc=%.4f phiErr=%.3f "
+                                "fold=%.2f nsym=%zu\n",
+                                name, s.sps, s.carrierFreqNorm, phiErr, fold,
+                                s.symbols.size());
+                } else {
+                    std::printf("[FAIL] %-24s valid=%d sps=%.3f off=%.2f "
+                                "fc=%.5f phiErr=%.3f fold=%.2f nsym=%zu\n",
+                                name, (int)s.valid, s.sps, s.timingOffset,
+                                s.carrierFreqNorm, phiErr, fold,
+                                s.symbols.size());
+                }
+            } else {
+                std::printf("[FAIL] %-24s classify n=%zu\n", name, res.size());
+                for (const auto& r : res) printPulse(r);
+            }
+        }
+        // Chirp-Parameter (up und down)
+        for (int up = 0; up < 2; ++up) {
+            const char* name = up == 0 ? "chirp-params-up" : "chirp-params-dn";
+            const double fc = up == 0 ? -0.10 : 0.05;
+            const double bw = 0.25;
+            std::mt19937 rng(62 + up);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genChirp(4000, bw, up == 0), fc, 20.0);
+            rec.silence(2000);
+            ++g_total;
+            iqclassify::ClassifierConfig cfg;
+            iqclassify::ModulationClassifier clf(cfg);
+            const auto res =
+                clf.classify(rec.buffer().data(), rec.buffer().size());
+            bool ok = res.size() == 1 &&
+                      res[0].modulation == iqclassify::ModulationType::Chirp;
+            if (ok) {
+                const iqclassify::ChirpParams c =
+                    clf.analyzeChirp(rec.buffer().data(), rec.buffer().size(),
+                                     res[0]);
+                const double fStartTrue =
+                    up == 0 ? fc - bw / 2 : fc + bw / 2;
+                const double fEndTrue = up == 0 ? fc + bw / 2 : fc - bw / 2;
+                const double slopeTrue = bw / 4000.0 * (up == 0 ? 1.0 : -1.0);
+                ok = c.valid && c.up == (up == 0) && c.r2 > 0.95 &&
+                     cycDist(c.fStartNorm, fStartTrue) < 0.01 &&
+                     cycDist(c.fEndNorm, fEndTrue) < 0.01 &&
+                     std::abs(c.bandwidthNorm - bw) < 0.03 &&
+                     std::abs(c.slopeNorm / slopeTrue - 1.0) < 0.15 &&
+                     std::abs(static_cast<std::ptrdiff_t>(c.startSample) -
+                              2000) <= 200;
+                if (ok) {
+                    ++g_ok;
+                    std::printf("[OK ] %-24s f0=%.4f f1=%.4f bw=%.4f "
+                                "slope=%.3e r2=%.3f @%zu\n",
+                                name, c.fStartNorm, c.fEndNorm, c.bandwidthNorm,
+                                c.slopeNorm, c.r2, c.startSample);
+                } else {
+                    std::printf("[FAIL] %-24s valid=%d up=%d r2=%.3f f0=%.4f "
+                                "f1=%.4f bw=%.4f slope=%.3e start=%zu\n",
+                                name, (int)c.valid, (int)c.up, c.r2, c.fStartNorm,
+                                c.fEndNorm, c.bandwidthNorm, c.slopeNorm,
+                                c.startSample);
+                }
+            } else {
+                std::printf("[FAIL] %-24s classify n=%zu\n", name, res.size());
+                for (const auto& r : res) printPulse(r);
+            }
+        }
+        // Symbol-Schnittstelle FSK2: Takt, Frequenzen, Ton-Entscheidungen
+        {
+            std::mt19937 rng(31);
+            const std::vector<iqtest::cd> fsk = iqtest::genFsk2(rng, 400, 8);
+            std::mt19937 rngTx(31);
+            std::uniform_real_distribution<double> u01(0.0, 1.0);
+            std::vector<int> bits(400);
+            for (int k = 0; k < 400; ++k) bits[k] = u01(rngTx) < 0.5 ? 1 : 0;
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(fsk, 0.05, 20.0, 2000);
+            rec.silence(2000);
+            ++g_total;
+            iqclassify::ClassifierConfig cfg;
+            iqclassify::ModulationClassifier clf(cfg);
+            const auto res =
+                clf.classify(rec.buffer().data(), rec.buffer().size());
+            bool ok = res.size() == 1 &&
+                      res[0].modulation == iqclassify::ModulationType::FSK2;
+            if (ok) {
+                const iqclassify::SymbolStream ss =
+                    clf.extractSymbols(rec.buffer().data(),
+                                       rec.buffer().size(), res[0]);
+                double m1 = 0, m0 = 0;
+                int c1 = 0, c0 = 0;
+                int best = 0;
+                std::size_t tot = 0;
+                for (std::size_t k = 0; k < ss.symbolFreqs.size(); ++k) {
+                    if (ss.fskTone[k]) {
+                        m1 += ss.symbolFreqs[k];
+                        ++c1;
+                    } else {
+                        m0 += ss.symbolFreqs[k];
+                        ++c0;
+                    }
+                }
+                const double sep =
+                    (c1 > 0 && c0 > 0) ? m1 / c1 - m0 / c0 : 0.0;
+                for (int sh = -8; sh <= 8; ++sh) {
+                    int match = 0;
+                    std::size_t t = 0;
+                    for (std::size_t k = 0; k < ss.fskTone.size(); ++k) {
+                        const long b = static_cast<long>(k) + sh;
+                        if (b >= 0 && b < 400) {
+                            ++t;
+                            if (ss.fskTone[k] == bits[static_cast<std::size_t>(b)])
+                                ++match;
+                        }
+                    }
+                    if (t > 0 && match > best) {
+                        best = match;
+                        tot = t;
+                    }
+                }
+                const double bitMatch =
+                    tot ? static_cast<double>(best) / static_cast<double>(tot)
+                        : 0.0;
+                ok = ss.valid && ss.type == iqclassify::ModulationType::FSK2 &&
+                     std::abs(ss.sps - 8.0) < 0.6 && ss.symbolFreqs.size() >= 350 &&
+                     std::abs(sep - 0.125) < 0.03 && bitMatch >= 0.9;
+                if (ok) {
+                    ++g_ok;
+                    std::printf("[OK ] %-24s sps=%.2f nsym=%zu sep=%.4f "
+                                "bitmatch=%.2f\n",
+                                "symbols-fsk2", ss.sps, ss.symbolFreqs.size(),
+                                sep, bitMatch);
+                } else {
+                    std::printf("[FAIL] %-24s valid=%d sps=%.3f nsym=%zu "
+                                "sep=%.4f bitmatch=%.2f\n",
+                                "symbols-fsk2", (int)ss.valid, ss.sps,
+                                ss.symbolFreqs.size(), sep, bitMatch);
+                }
+            } else {
+                std::printf("[FAIL] %-24s classify n=%zu\n", "symbols-fsk2",
+                            res.size());
+                for (const auto& r : res) printPulse(r);
+            }
+        }
+        // Symbol-Schnittstelle PSK: Symbole direkt verfuegbar
+        {
+            std::vector<iqtest::cd> x = makePsk(4, 777, -0.08, -1.1, 400, 8);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(x, 0.0, 20.0, 2000);
+            rec.silence(2000);
+            ++g_total;
+            iqclassify::ClassifierConfig cfg;
+            iqclassify::ModulationClassifier clf(cfg);
+            const auto res =
+                clf.classify(rec.buffer().data(), rec.buffer().size());
+            bool ok = res.size() == 1 &&
+                      res[0].modulation == iqclassify::ModulationType::QPSK;
+            if (ok) {
+                const iqclassify::SymbolStream ss =
+                    clf.extractSymbols(rec.buffer().data(),
+                                       rec.buffer().size(), res[0]);
+                const double fold = foldConc(ss.symbols, 4);
+                ok = ss.valid &&
+                     ss.type == iqclassify::ModulationType::QPSK &&
+                     ss.symbols.size() >= 300 && fold > 0.9;
+                if (ok) {
+                    ++g_ok;
+                    std::printf("[OK ] %-24s nsym=%zu fold=%.2f sps=%.2f\n",
+                                "symbols-qpsk", ss.symbols.size(), fold,
+                                ss.sps);
+                } else {
+                    std::printf("[FAIL] %-24s valid=%d nsym=%zu fold=%.2f\n",
+                                "symbols-qpsk", (int)ss.valid, ss.symbols.size(),
+                                fold);
+                }
+            } else {
+                std::printf("[FAIL] %-24s classify n=%zu\n", "symbols-qpsk",
+                            res.size());
+            }
+        }
+        // Auf CW-Puls sind die Analyse-Methoden definiert invalid.
+        {
+            std::mt19937 rng(5);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genCw(rng, 3000), 0.20, 20.0);
+            rec.silence(2000);
+            ++g_total;
+            iqclassify::ClassifierConfig cfg;
+            iqclassify::ModulationClassifier clf(cfg);
+            const auto res =
+                clf.classify(rec.buffer().data(), rec.buffer().size());
+            bool ok = res.size() == 1;
+            if (ok) {
+                ok = !clf.synchronizePsk(rec.buffer().data(),
+                                         rec.buffer().size(), res[0])
+                          .valid &&
+                     !clf.analyzeChirp(rec.buffer().data(), rec.buffer().size(),
+                                       res[0])
+                          .valid &&
+                     !clf.extractSymbols(rec.buffer().data(),
+                                         rec.buffer().size(), res[0])
+                          .valid;
+            }
+            if (ok) {
+                ++g_ok;
+                std::printf("[OK ] %-24s auf CW-Puls definiert invalid\n",
+                            "api-invalid-on-cw");
+            } else {
+                std::printf("[FAIL] %-24s\n", "api-invalid-on-cw");
+            }
+        }
     }
     std::printf("\nscore: %d/%d\n", g_ok, g_total);
     std::printf("%s\n", g_ok == g_total ? "ALL TESTS PASSED"

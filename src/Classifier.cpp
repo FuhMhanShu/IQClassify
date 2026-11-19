@@ -731,6 +731,80 @@ std::pair<ModulationType, double> stage2(const Features& f,
     return classifyPhase(f, cfg, y);
 }
 
+// Vollsuche der Symbolratenlinie im zyklischen Spektrum eines reellen
+// Signals (z. B. |Delta f_inst| bei FSK, wo die Huellkurve konstant ist):
+// K in [12*nft/n, 0.625*nft], also sps in [1.6, n/12].
+std::pair<double, double> rsLineFull(const std::vector<double>& v) {
+    const std::size_t n = v.size();
+    if (n < 8) return {0.0, 0.0};
+    const std::size_t nft = detail::pow2ceil(2 * n);
+    double mean = 0.0;
+    for (double x : v) mean += x;
+    mean /= static_cast<double>(n);
+    std::vector<cd> buf(nft, cd(0.0, 0.0));
+    for (std::size_t i = 0; i < n; ++i) buf[i] = cd(v[i] - mean, 0.0);
+    const std::vector<cd> tsig = buf;
+    detail::fftInPlace(buf, false);
+    const long kLo = std::max(1L, static_cast<long>(12.0 * static_cast<double>(nft) /
+                                                   static_cast<double>(n)));
+    const long kHi = std::min<long>(static_cast<long>(0.625 * static_cast<double>(nft)),
+                                    static_cast<long>(nft) - 2);
+    if (kHi <= kLo + 2) return {0.0, 0.0};
+    std::vector<double> mags;
+    mags.reserve(static_cast<std::size_t>(kHi - kLo));
+    long bestK = 0;
+    double bestV = -1.0;
+    for (long k = kLo; k < kHi; ++k) {
+        const cd& f = buf[static_cast<std::size_t>(k)];
+        const double vv = f.real() * f.real() + f.imag() * f.imag();
+        mags.push_back(vv);
+        if (vv > bestV) {
+            bestV = vv;
+            bestK = k;
+        }
+    }
+    std::sort(mags.begin(), mags.end());
+    const double med = mags[mags.size() / 2];
+    const double prom = bestV / std::max(med, 1e-30);
+    if (bestK <= kLo || bestK >= kHi - 1) return {0.0, prom};
+    const double a0 = std::norm(buf[static_cast<std::size_t>(bestK - 1)]);
+    const double a1 = std::norm(buf[static_cast<std::size_t>(bestK)]);
+    const double a2 = std::norm(buf[static_cast<std::size_t>(bestK + 1)]);
+    const double den = a0 - 2.0 * a1 + a2;
+    double delta = 0.0;
+    if (std::abs(den) > 1e-30) {
+        delta = 0.5 * (a0 - a2) / den;
+        if (std::abs(delta) > 1.0) delta = 0.0;
+    }
+    double fr = (static_cast<double>(bestK) + delta) / static_cast<double>(nft);
+    auto coh = [&](double f) {
+        cd acc(0.0, 0.0);
+        double ph = 0.0;
+        const double stp = 2.0 * kPi * f;
+        for (const cd& vv : tsig) {
+            ph += stp;
+            acc += vv * cd(std::cos(ph), -std::sin(ph));
+        }
+        return std::abs(acc);
+    };
+    double d = 3.0 / static_cast<double>(nft);
+    while (d > 1e-7) {
+        const double flo = fr - d;
+        const double fhi = fr + d;
+        fr = coh(flo) > coh(fhi) ? flo : fhi;
+        d *= 0.5;
+    }
+    return {fr, prom};
+}
+
+// Haertung: nicht-endliche Samples eines Slices als Null behandeln.
+void sanitizeSlice(std::vector<cd>& y) {
+    for (cd& v : y) {
+        if (!std::isfinite(v.real()) || !std::isfinite(v.imag()))
+            v = cd(0.0, 0.0);
+    }
+}
+
 }  // namespace
 
 // --------------------------------------------------------------------------
@@ -929,6 +1003,284 @@ std::vector<std::complex<float>> ModulationClassifier::extractPulseF(
                                           static_cast<float>(v.imag())));
     }
     return out;
+}
+
+// ---------------------------------------------------------------------------
+// PSK-Synchronisation (batchweise, ohne Einschwingvorgang)
+// ---------------------------------------------------------------------------
+PskSync ModulationClassifier::synchronizePsk(const std::complex<double>* iq,
+                                             std::size_t n,
+                                             const PulseResult& pulse) const {
+    PskSync r;
+    if (iq == nullptr || n == 0) return r;
+    if (pulse.modulation != ModulationType::BPSK &&
+        pulse.modulation != ModulationType::QPSK)
+        return r;
+    std::vector<cd> y = extractPulse(iq, n, pulse);
+    sanitizeSlice(y);
+    if (y.size() < 256) return r;
+    const Features f =
+        extractFeatures(y, pulse.centerFreqRefined, pulse.bandwidthNorm,
+                        pulse.bandBins, pulse.snrDb, pulse.spectralFlatnessDb,
+                        cfg_);
+    const std::vector<std::size_t> idx = estimateSymbolsRobust(f, cfg_);
+    if (idx.size() < cfg_.timingMinSyms) return r;
+    std::vector<cd> s0 = mfSymbols(y, idx, cfg_);
+    if (s0.size() < cfg_.timingMinSyms) {
+        s0.clear();
+        for (std::size_t i : idx)
+            s0.push_back(cd(f.env[i] * std::cos(f.ph[i]),
+                            f.env[i] * std::sin(f.ph[i])));
+    }
+    // Resttraeger pro Symbol aus dem z^M-Spektrum (batchweise).
+    const auto fp = carrierFromSymbols(s0);
+    const double fresSym = fp.first;
+    // Symboltakt + Auge: batchweise ueber die zyklische Leistungslinie.
+    std::vector<double> env2(f.n);
+    for (std::size_t i = 0; i < f.n; ++i) env2[i] = f.env[i] * f.env[i];
+    const auto rp = rsFromCyclic(env2, f.n, f.bw);
+    if (rp.first <= 0.0) return r;
+    const double sps = 1.0 / rp.first;
+    const double off = eyeOffset(f.env, f.n, sps);
+    // Symbole derotieren und normieren.
+    double sp = 0.0;
+    for (const cd& v : s0) sp += std::norm(v);
+    sp /= static_cast<double>(s0.size());
+    const double sc = 1.0 / std::sqrt(std::max(sp, 1e-30));
+    const std::size_t len = s0.size();
+    std::vector<cd> s(len);
+    for (std::size_t k = 0; k < len; ++k) {
+        const double ph = -2.0 * kPi * fresSym * static_cast<double>(k);
+        s[k] = s0[k] * sc * cd(std::cos(ph), std::sin(ph));
+    }
+    // M-PSK-Restambiguität 2pi/M aufloesen: Kandidat mit minimaler Distanz
+    // der Konstellation zum festen Gitter {2*pi*j/M}.
+    const int M = (pulse.modulation == ModulationType::BPSK) ? 2 : 4;
+    cd acc(0.0, 0.0);
+    for (const cd& v : s) {
+        cd p = v;
+        for (int i = 1; i < M; ++i) p *= v;
+        acc += p;
+    }
+    const double psi = std::atan2(acc.imag(), acc.real());
+    double bestScore = -1e300;
+    double phiC = 0.0;
+    for (int q = 0; q < M; ++q) {
+        const double phc = (psi + 2.0 * kPi * q / M) / M;
+        double score = 0.0;
+        for (const cd& v : s) {
+            double a = std::atan2(v.imag(), v.real()) - phc;
+            a = std::fmod(a, 2.0 * kPi);
+            if (a < 0.0) a += 2.0 * kPi;
+            if (a >= kPi) a -= 2.0 * kPi;
+            double d = 1e300;
+            for (int j = 0; j < M; ++j)
+                d = std::min(d, std::abs(a - 2.0 * kPi * j / M));
+            if (d > kPi) d = 2.0 * kPi - d;
+            score -= d;
+        }
+        if (score > bestScore) {
+            bestScore = score;
+            phiC = phc;
+        }
+    }
+    for (cd& v : s) v *= cd(std::cos(-phiC), std::sin(-phiC));
+    // Traeger pro Sample und absolute Traegerfrequenz; Phase am Pulsanfang:
+    // y[0] (Slice-Index 0 == startSampleFine) traegt phiC + 2*pi*fRes*off.
+    const double fRes = fresSym / sps;
+    r.valid = true;
+    r.sps = sps;
+    r.timingOffset = off;
+    r.carrierFreqNorm = wrap01(pulse.centerFreqRefined + fRes);
+    double phiStart = phiC - 2.0 * kPi * fRes * off;
+    phiStart = std::fmod(phiStart, 2.0 * kPi);
+    if (phiStart > kPi) phiStart -= 2.0 * kPi;
+    if (phiStart < -kPi) phiStart += 2.0 * kPi;
+    r.carrierPhaseAtStart = phiStart;
+    r.snrDb = pulse.snrDb;
+    r.symbols = std::move(s);
+    return r;
+}
+
+PskSync ModulationClassifier::synchronizePskF(const std::complex<float>* iq,
+                                              std::size_t n,
+                                              const PulseResult& pulse) const {
+    if (iq == nullptr || n == 0) return PskSync{};
+    std::vector<std::complex<double>> buf(n);
+    for (std::size_t i = 0; i < n; ++i)
+        buf[i] = std::complex<double>(static_cast<double>(iq[i].real()),
+                                      static_cast<double>(iq[i].imag()));
+    return synchronizePsk(buf.data(), buf.size(), pulse);
+}
+
+// ---------------------------------------------------------------------------
+// Chirp-Parameter
+// ---------------------------------------------------------------------------
+ChirpParams ModulationClassifier::analyzeChirp(
+    const std::complex<double>* iq, std::size_t n,
+    const PulseResult& pulse) const {
+    ChirpParams r;
+    if (iq == nullptr || n == 0) return r;
+    if (pulse.modulation != ModulationType::Chirp) return r;
+    std::vector<cd> y = extractPulse(iq, n, pulse);
+    sanitizeSlice(y);
+    if (y.size() < 256) return r;
+    const Features f =
+        extractFeatures(y, pulse.centerFreqRefined, pulse.bandwidthNorm,
+                        pulse.bandBins, pulse.snrDb, pulse.spectralFlatnessDb,
+                        cfg_);
+    // Gewichtete Regression auf f_inst (Resttraeger eingerechnet, da der
+    // Achsenabschnitt die absolute Frequenz am Pulsanfang liefern soll),
+    // mittlere 80 % des Pulses - analog zum Chirp-Fit in extractFeatures.
+    const std::size_t n1 = f.n >= 1 ? f.n - 1 : 0;
+    const std::size_t iLo = n1 / 10;
+    const std::size_t iHi = n1 - n1 / 10;
+    const std::size_t iHiEff = std::min(iHi, n1);
+    double sw = 0.0, xm = 0.0, ym = 0.0;
+    for (std::size_t i = iLo; i < iHiEff; ++i) {
+        const double w = f.env[i] * f.env[i];
+        sw += w;
+        xm += w * static_cast<double>(i);
+        ym += w * (f.finst[i] + f.residF);
+    }
+    xm /= sw > 1e-30 ? sw : 1e-30;
+    ym /= sw > 1e-30 ? sw : 1e-30;
+    double num = 0.0, den = 0.0;
+    for (std::size_t i = iLo; i < iHiEff; ++i) {
+        const double w = f.env[i] * f.env[i];
+        const double dx = static_cast<double>(i) - xm;
+        num += w * dx * (f.finst[i] + f.residF - ym);
+        den += w * dx * dx;
+    }
+    const double slope = num / (den > 1e-30 ? den : 1e-30);
+    const double intercept = ym - slope * xm;  // f_inst am Slice-Anfang
+    const double fStartRel = intercept;
+    const double fEndRel = intercept + slope * static_cast<double>(n1 - 1);
+    r.valid = f.chirpR2 > cfg_.tChirpR2;
+    r.startSample = pulse.startSampleFine;
+    r.numSamples = pulse.numSamplesFine;
+    r.fStartNorm = wrap01(pulse.centerFreqRefined + fStartRel);
+    r.fEndNorm = wrap01(pulse.centerFreqRefined + fEndRel);
+    r.centerFreqNorm = pulse.centerFreqRefined;
+    r.bandwidthNorm = std::abs(fEndRel - fStartRel);
+    r.slopeNorm = slope;
+    r.snrDb = pulse.snrDb;
+    r.r2 = f.chirpR2;
+    r.up = slope > 0.0;
+    return r;
+}
+
+ChirpParams ModulationClassifier::analyzeChirpF(
+    const std::complex<float>* iq, std::size_t n,
+    const PulseResult& pulse) const {
+    if (iq == nullptr || n == 0) return ChirpParams{};
+    std::vector<std::complex<double>> buf(n);
+    for (std::size_t i = 0; i < n; ++i)
+        buf[i] = std::complex<double>(static_cast<double>(iq[i].real()),
+                                      static_cast<double>(iq[i].imag()));
+    return analyzeChirp(buf.data(), buf.size(), pulse);
+}
+
+// ---------------------------------------------------------------------------
+// Symbol-Schnittstelle (PSK + FSK)
+// ---------------------------------------------------------------------------
+SymbolStream ModulationClassifier::extractSymbols(
+    const std::complex<double>* iq, std::size_t n,
+    const PulseResult& pulse) const {
+    SymbolStream r;
+    if (iq == nullptr || n == 0) return r;
+    if (pulse.modulation == ModulationType::BPSK ||
+        pulse.modulation == ModulationType::QPSK) {
+        PskSync s = synchronizePsk(iq, n, pulse);
+        if (!s.valid) return r;
+        r.valid = true;
+        r.type = pulse.modulation;
+        r.sps = s.sps;
+        r.timingOffset = s.timingOffset;
+        r.carrierFreqNorm = s.carrierFreqNorm;
+        r.carrierPhaseAtStart = s.carrierPhaseAtStart;
+        r.symbols = std::move(s.symbols);
+        return r;
+    }
+    if (pulse.modulation == ModulationType::FSK2) {
+        std::vector<cd> y = extractPulse(iq, n, pulse);
+        sanitizeSlice(y);
+        if (y.size() < 256) return r;
+        const Features f =
+            extractFeatures(y, pulse.centerFreqRefined, pulse.bandwidthNorm,
+                            pulse.bandBins, pulse.snrDb,
+                            pulse.spectralFlatnessDb, cfg_);
+        // FSK hat konstante Huellkurve: Symboltakt aus den f_inst-
+        // Umschaltspitzen (Vollsuche der Ratenlinie in |Delta f_inst|).
+        // f.finst hat f.n-1 Eintraege, daher n1 = f.n-2 Difference-Werte.
+        const std::size_t n1 = f.n >= 2 ? f.n - 2 : 0;
+        if (n1 < 64) return r;
+        std::vector<double> tr(n1);
+        for (std::size_t i = 0; i < n1; ++i)
+            tr[i] = std::abs(f.finst[i + 1] - f.finst[i]);
+        const auto rp = rsLineFull(tr);
+        if (rp.first <= 0.0 || rp.second < cfg_.tRsProm) return r;
+        const double sps = 1.0 / rp.first;
+        if (sps < 1.6 || sps > std::max(2.0, static_cast<double>(f.n) / 12.0))
+            return r;
+        // Timing-Offset: Gitter so legen, dass es die Umschaltspitzen trifft.
+        double bestOff = 0.0;
+        double bestScore = -1.0;
+        for (double off = 0.0; off < sps; off += 0.25) {
+            double sc = 0.0;
+            long c = 0;
+            for (double p = off; p < static_cast<double>(n1) - 1.0;
+                 p += sps) {
+                const std::size_t i = static_cast<std::size_t>(std::lround(p));
+                if (i < n1) {
+                    sc += tr[i];
+                    ++c;
+                }
+            }
+            if (c > 0 && sc / static_cast<double>(c) > bestScore) {
+                bestScore = sc / static_cast<double>(c);
+                bestOff = off;
+            }
+        }
+        r.valid = true;
+        r.type = ModulationType::FSK2;
+        r.sps = sps;
+        r.timingOffset = bestOff;
+        r.carrierFreqNorm = pulse.centerFreqRefined;
+        // Symbolzentren liegen bei Umschaltspitze + sps/2; Frequenz pro
+        // Symbol als Median ueber +/-2 Samples um die Mitte (robust gegen
+        // die Umschaltflanken).
+        for (double p = bestOff + 0.5 * sps; p < static_cast<double>(n1) - 3.0;
+             p += sps) {
+            const std::size_t c = static_cast<std::size_t>(std::lround(p));
+            std::vector<double> w;
+            for (long d = -2; d <= 2; ++d) {
+                const std::size_t i = c + static_cast<std::size_t>(d);
+                if (i < n1) w.push_back(f.finst[i]);
+            }
+            if (w.empty()) continue;
+            std::sort(w.begin(), w.end());
+            const double fs = w[w.size() / 2];
+            r.symbolFreqs.push_back(fs);
+            r.fskTone.push_back(fs > 0.0 ? 1 : 0);
+        }
+        if (static_cast<int>(r.symbolFreqs.size()) <
+            static_cast<int>(cfg_.timingMinSyms))
+            r.valid = false;
+        return r;
+    }
+    return r;
+}
+
+SymbolStream ModulationClassifier::extractSymbolsF(
+    const std::complex<float>* iq, std::size_t n,
+    const PulseResult& pulse) const {
+    if (iq == nullptr || n == 0) return SymbolStream{};
+    std::vector<std::complex<double>> buf(n);
+    for (std::size_t i = 0; i < n; ++i)
+        buf[i] = std::complex<double>(static_cast<double>(iq[i].real()),
+                                      static_cast<double>(iq[i].imag()));
+    return extractSymbols(buf.data(), buf.size(), pulse);
 }
 
 }  // namespace iqclassify

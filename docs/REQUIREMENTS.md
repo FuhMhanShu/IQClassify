@@ -36,6 +36,30 @@ Jeder erkannte Puls muss im IQ-Signal wiederfindbar sein:
   Mittenfrequenz), sodass der Puls ohne erneute Suche weiterverarbeitet
   werden kann.
 
+## Low-SNR-Detektion
+
+Auch Signale unterhalb von 6 dB SNR müssen erkannt werden, Ziel ~2 dB:
+
+- SNR-Gate (`minSnrDb`) Default 2 dB; Banddetektor brückt Lücken zwischen
+  Bandläufen, die noch deutlich über dem Rauschboden liegen
+  (`bandBridgeDb`), damit schwache Breitbandsignale nicht fragmentieren.
+- Reines Rauschen darf auch bei niedrigem SNR keine Pulse erzeugen.
+-Geeignete IQ-Testsignale (CW, Chirp, BPSK, QPSK, QAM16, FSK2, OFDM) bei
+  0-4 dB SNR in der Testsuite verankert.
+
+## Analyse-API je erkanntem Puls
+
+- PSK (BPSK/QPSK): `synchronizePsk` liefert den phasenrichtig
+  aufsynchronisierten Pulsanfang — Symboltakt, Trägerfrequenz und
+  Trägerphase am Pulsanfang (auf das M-PSK-Raster aufgelöst) sowie die
+  derotierten Symbole. Phasenkorrektur ohne Einschwingvorgang eines
+  Clock-Synchronizers (Batch-Schätzung über den ganzen Puls).
+- Chirp: `analyzeChirp` berechnet alle Parameter — Anfangs-/Endfrequenz,
+  Mittenfrequenz, Hub, Steigung, Richtung, Bestimmtheitsmaß r², SNR.
+- Symbol-Schnittstellen: `extractSymbols` liefert für PSK die Symbole und
+  für FSK2 Frequenz/Ton-Entscheidung pro Symbol (inkl. Symboltakt), als
+  Ausgangspunkt für die spätere Symbolgewinnung.
+
 ## Rahmenbedingungen
 
 - Einbindung als statische Bibliothek, unterstützt via CMake

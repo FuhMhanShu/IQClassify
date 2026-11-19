@@ -32,6 +32,10 @@ struct ClassifierConfig {
     double bandGuardDb = 12.0;   // Schwelle ueber Boden fuer Bandstart
     double bandPeakDb = 16.0;    // erforderlicher Bandpeak ueber Boden
     double bandMeanDb = 9.0;     // erforderliches Bandmittel ueber Boden
+    double bandBridgeDb = 6.0;   // Low-SNR-Bruecke: Luecke zwischen zwei Laeufen
+                                 // verschmelzen, wenn ihr mittleres PSD noch
+                                 // bandBridgeDb ueber dem Boden liegt (Signal
+                                 // in der Luecke, kein Rauschen)
     double bandStrongDb = 31.0;  // schmale starke Toene umgehen die Breitengrenzen
     double bandMergeFrac = 0.05; // Satellitenmerge: Luecke <= Anteil * Breite
     double satMergeWidthRatio = 6.0;  // relatives Breitenverhaeltnis fuer Absolut-Merge
@@ -39,7 +43,10 @@ struct ClassifierConfig {
     long satMergeDenom = 64;            // Absolutluecke = max(4, nft/64) Bins
 
     // ---- SNR / Filterung
-    double minSnrDb = 6.0;
+    double minSnrDb = 2.0;       // SNR-Gate Stufe 1; Default erlaubt Detektion
+                                 // bis herunter zu ~2 dB SNR (CW/Chirp), breit-
+                                 // bandige Typen brauchen ~3-4 dB fuer korrekte
+                                 // Klassifikation (siehe docs/METHODOLOGY.md)
     double tFlatDb = 2.5;        // in-band Spektralglaette (Std, dB)
 
     // ---- Stufe 1

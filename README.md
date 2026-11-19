@@ -23,9 +23,18 @@ klassifiziert die Modulationsart jedes Pulses in zwei Stufen:
   (`startSampleFine`/`numSamplesFine`) und Sub-Bin-Mittenfrequenz
   (`centerFreqRefined`) ausgegeben; `extractPulse` liefert den Puls als
   Basisband-Slice direkt aus dem IQ-Puffer (Wiederfinden im Signal).
+- Low-SNR: Detektion bis herunter zu ~2 dB SNR (Default `minSnrDb` = 2 dB;
+  Band-Bruecke `bandBridgeDb` verschmilzt Rauschluecken in schwachen
+  Breitbandsignalen). Reine Rauschpuffer liefern weiterhin keine Pulse.
+- Analyse-API je Puls: `synchronizePsk` synchronisiert einen PSK-Puls
+  phasenrichtig auf den Pulsanfang (Traegerfrequenz/-phase, Symboltakt,
+  derotierte Symbole — Batch-Schaetzung, kein Einschwingvorgang),
+  `analyzeChirp` liefert alle Parameter eines Chirp-Pulses (Start-/End-
+  frequenz, Hub, Steigung, Richtung, r²), `extractSymbols` stellt die
+  Symbol-Schnittstelle fuer PSK und FSK2 bereit.
 - Klassenkapselung: eine Fassade (`ModulationClassifier`), alle
   Schwellwerte konfigurierbar (`ClassifierConfig`).
-- Deterministische Testsuite ohne externes Testframework: 106 Szenarien
+- Deterministische Testsuite ohne externes Testframework: 119 Szenarien
   aus der Qualitaetsmatrix (SNR-Raster, Oversampling, Frequenzlagen,
   Chirp-Varianten, Pulslaengen, Mehrpuls, Seed-Streuung) plus
   Haertungsfaelle (Nullzeiger, leere und NaN-beladene Eingaben,

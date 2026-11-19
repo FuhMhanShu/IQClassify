@@ -39,6 +39,14 @@ zerlegen sie zu eigenständigen Läufen. Verschmolzen wird bei Lücke <=
 an eine mindestens sechsmal breitere Band. Zwei schmale Nachbarn bleiben
 getrennt (eng benachbarte Töne überleben).
 
+Low-SNR-Brücke: Im schwachen SNR-Regime (~2-4 dB) zerbricht das Spektrum
+eines Breitbandsignals in getrennte Läufe, weil die Lücken zwischen den
+Läufen nur noch wenig über dem Rauschboden liegen. Nach der
+MinGap-Verschmelzung werden daher benachbarte Läufe erneut verschmolzen,
+wenn das mittlere PSD in der Lücke noch `bandBridgeDb` (6 dB) über dem
+Boden liegt — dann ist dort Signal und kein Rauschen. Reines Rauschen
+(leere Lücke am Boden) wird dadurch nicht gebrückt.
+
 SNR (Spektraldichte): Verhältnis der mittleren in-band-Leistungsdichte zur
 Außen-Leistungsdichte. Säume anderer Bänder werden (mit Breiten-Wächter)
 aus der Außen-Referenz ausgeschlossen; im Mehrpuls-Fall bricht die
@@ -87,6 +95,45 @@ Lage, direkt aus den Zwischengroessen der Pipeline abgeleitet:
   Rückverschiebung auf die Bandmitte. `slice[k]` entspricht
   `iq[startSampleFine + k] * e^{-j*2pi*f0*k}`.
 
+## Low-SNR-Detektion (bis ~2 dB SNR)
+
+Zwei Anpassungen heben die untere SNR-Grenze von 6 dB auf ~2 dB:
+
+- `minSnrDb`-Default 6 dB → 2 dB (SNR-Gate Stufe 1).
+- Low-SNR-Brücke im Banddetektor (`bandBridgeDb`, siehe Phase 1): Lücken
+  zwischen Bandläufen, die noch deutlich über dem Rauschboden liegen,
+  werden verschmolzen, damit schwache Breitbandsignale nicht in Fragmente
+  zerfallen.
+
+Verifizierte untere Grenzen je Typ (Testsuite, Abschnitt 14): CW ~0-2 dB,
+Chirp ~2-3 dB, BPSK/QPSK mit langen Pulsen ~2-4 dB, QAM16 ~4 dB; FSK2 und
+OFDM brauchen weiterhin >= 6-8 dB. Reines Rauschen erzeugt auch bei 2 dB
+keine Pulse (kein False-Positive durch die Brücke).
+
+## Analyse-API (PSK-Synchronisation, Chirp-Parameter, Symbole)
+
+Alle drei Methoden arbeiten auf dem via `extractPulse` gewonnenen
+Basisband-Slice des Pulses (Zeitfenster der feinen Lage):
+
+- `synchronizePsk` (BPSK/QPSK): Symbolratenlinie per Vollsuche im
+  zyklischen Leistungsspektrum, Augenschwerpunkt, RRC-Matched-Filter,
+  Symbolabtastung, Restträger per z^M-Faltung der Symbolfolge. Alles als
+  Batch-Schätzung über den ganzen Puls — der Symboltakt und die
+  Trägerphase am Pulsanfang (`carrierPhaseAtStart`, relativ zu
+  `startSampleFine`) stehen damit ohne Einschwingvorgang sofort fest
+  (kein Clock-Synchronizer, der erst einlaufen müsste). Restambiguität
+  der Phase: 2π/M. Die Symbole werden auf das M-PSK-Raster derotiert.
+- `analyzeChirp`: hüllkurven²-gewichtete lineare Regression der
+  Momentanfrequenz über den Puls; liefert fStart/fEnd (zyklisch),
+  Mittenfrequenz, Hub, Steigung (Sample⁻¹, Richtung über Vorzeichen), r²
+  und up/down.
+- `extractSymbols`: Symbol-Schnittstelle. PSK: identisch zu
+  `synchronizePsk` (Symbole direkt verfügbar). FSK2: konstante Hüllkurve,
+  daher Symboltakt aus den Umschaltspitzen von |Δf_inst| (Vollsuche der
+  Ratenlinie, Gitter so gelegt, dass es die Spitzen trifft); pro Symbol
+  die Mittenfrequenz (Median über ±2 Samples um das Symbolzentrum) und die
+  Ton-Entscheidung 0/1.
+
 ## Phase 2: Merkmale
 
 Auf jedem (Band, Crop):
@@ -111,7 +158,7 @@ Auf jedem (Band, Crop):
 ## Phase 3: Stufe 1 (grobe Klasse)
 
 Reihenfolge (jede Regel schließt ab):
-1. SNR-Gate: SNR < minSnrDb (6 dB) überspringt den Abschnitt.
+1. SNR-Gate: SNR < minSnrDb (Default 2 dB) überspringt den Abschnitt.
 2. Ton: Anteil der Samples mit |f_inst| < 0.004 über 70 % und
    Trägerkohärenz > 0.85. Der Test ist unabhängig von der detektierten
    Bandbreite; der Splatter benachbarter Pulse darf einen CW-Puls nicht in
@@ -180,7 +227,7 @@ ist dort mit seiner Bedeutung kommentiert. Eine Änderung erfordert eine
 Die Referenzimplementierung führt die C++-Pipeline elementweise aus
 (äquivalente Arithmetik) und wurde gegen eine erweiterte Qualitätsmatrix
 aus 168 Szenarien gefahren. Die C++-Testsuite (tests/test_main.cpp,
-106 Szenarien) deckt den verifizierten robusten Bereich ab; jedes Szenario
+119 Szenarien) deckt den verifizierten robusten Bereich ab; jedes Szenario
 der Suite wurde in der Referenz über mindestens drei Seeds bestätigt.
 
 - Basiskalibrierung, SNR 20 dB, sps 8: 9/9 korrekt (BPSK, QPSK, FSK2,
@@ -206,6 +253,15 @@ der Suite wurde in der Referenz über mindestens drei Seeds bestätigt.
 - Seed-Streuung: QPSK bei 10 dB und QAM16 bei 20 dB, je 5 Seeds ohne
   Ausreißer (Referenz); OFDM (nfft 256, cp 64, 40 Symbole, Last 0.3)
   bei 10/15/20 dB über 3 Seeds stabil.
+- Low-SNR (Abschnitt 14): CW 1-3 dB, Chirp 2-3 dB, BPSK/QPSK mit 1000
+  Symbolen 2-4 dB, QAM16 mit 2000 Symbolen 4 dB — je sauber ein Puls mit
+  korrekter Klasse und Frequenz; reines Rauschen bei 2 dB liefert keine
+  Pulse.
+- Analyse-API (Abschnitt 15): PSK-Sync BPSK/QPSK (sps, Trägerfrequenz,
+  Phasenfehler am Pulsanfang < 0.35 rad auf dem M-PSK-Raster, Phasenfaltung
+  der Symbole > 0.9), Chirp-Parameter up/down (fStart/fEnd auf 0.001,
+  Steigung auf 15 %, r² > 0.99), FSK2-Symbole (Bit-Match 1.00),
+  definierte invalid-Ergebnisse auf CW.
 - Härtungsfälle: Nullzeiger, leere und Miniatureingaben, reines Rauschen,
   Null- und DC-Puffer, vollständig NaN-/Inf-beladene Puffer sowie
   NaN-/Inf-/Null-Dropouts mitten in einem Puls: definierte Ergebnisse,
@@ -233,7 +289,8 @@ Eingabesicherung (defense in depth, mehrschichtig):
 
 ## Grenzen
 
-- Mindestpuls 400 Samples, Mindest-SNR 6 dB (Vollauslastung aller
+- Mindestpuls 400 Samples, Mindest-SNR ~2 dB (CW/Chirp; breitbandige
+  PSK/QAM ~3-4 dB, QAM16 ~4 dB; FSK2/OFDM >= 6-8 dB; Vollauslastung aller
   Typen ab ~12 dB; QAM256 ab ~15-20 dB; FSK2 ab ~12-15 dB stabil).
 - Oversamplingfaktor: sps 4 bis 8 für alle Typen; BPSK/QPSK/QAM bis
   sps 32. sps 2 erzeugt pulsförmige Breitbandsignale und wird nicht

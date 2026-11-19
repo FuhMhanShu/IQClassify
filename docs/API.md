@@ -65,6 +65,20 @@ Ergebnis je erkanntem Puls:
         std::vector<std::complex<float>> extractPulseF(
             const std::complex<float>* iq, std::size_t n,
             const PulseResult& pulse) const;
+        PskSync synchronizePsk(const std::complex<double>* iq, std::size_t n,
+                               const PulseResult& pulse) const;
+        PskSync synchronizePskF(const std::complex<float>* iq, std::size_t n,
+                                const PulseResult& pulse) const;
+        ChirpParams analyzeChirp(const std::complex<double>* iq, std::size_t n,
+                                 const PulseResult& pulse) const;
+        ChirpParams analyzeChirpF(const std::complex<float>* iq, std::size_t n,
+                                  const PulseResult& pulse) const;
+        SymbolStream extractSymbols(const std::complex<double>* iq,
+                                    std::size_t n,
+                                    const PulseResult& pulse) const;
+        SymbolStream extractSymbolsF(const std::complex<float>* iq,
+                                     std::size_t n,
+                                     const PulseResult& pulse) const;
         const ClassifierConfig& config() const;
     };
 
@@ -96,6 +110,53 @@ Ergebnis je erkanntem Puls:
   (Rückverschiebung: `slice[k] * e^{+j*2pi*centerFreqRefined*k}`).
   Nullzeiger, leere Eingabe oder ein Puls außerhalb des Puffers liefern
   ein leeres Ergebnis.
+
+## Analyse-API (PSK-Synchronisation, Chirp-Parameter, Symbole)
+
+Drei Methoden verfeinern einen bereits klassifizierten Puls. Alle nehmen
+den Originalpuffer plus das `PulseResult` und liefern bei Erfolg
+`valid == true`; bei falscher Modulationsart, Nullzeiger oder zu kurzem
+Puls ist das Ergebnis definiert `invalid`.
+
+`PskSync synchronizePsk(F)` — nur für BPSK/QPSK. Synchronisiert den Puls
+phasenrichtig auf seinen Anfang: Batch-Schätzung über den gesamten Puls
+(Symbolratenlinie + RRC-Matched-Filter + Träger-Faltung z^M), daher kein
+Einschwingvorgang ("Einschwingheizen") eines Clock-Synchronizers.
+
+| Feld | Bedeutung |
+|---|---|
+| sps | Samples pro Symbol (fein, z. B. 8.000) |
+| timingOffset | erste Symbolzeit relativ zu `startSampleFine`, in [0, sps) |
+| carrierFreqNorm | Trägerfrequenz des Pulses, zyklisch in [0,1) |
+| carrierPhaseAtStart | Trägerphase am Pulsanfang (`startSampleFine`), rad, auf das M-PSK-Raster aufgelöst (Restambiguität 2π/M) |
+| snrDb | geschätzte SNR des Pulses |
+| symbols | derotierte, normierte Symbole (Betrag ~1, auf das M-PSK-Raster gedreht) |
+
+`ChirpParams analyzeChirp(F)` — nur für Chirp. Lineare Regression der
+Momentanfrequenz über den Puls (hüllkurven²-gewichtet).
+
+| Feld | Bedeutung |
+|---|---|
+| startSample / numSamples | Pulsfenster (`startSampleFine`/`numSamplesFine`) |
+| fStartNorm / fEndNorm | Frequenz am Pulsanfang/-ende, zyklisch in [0,1) |
+| centerFreqNorm | Mittenfrequenz (fStart+fEnd)/2 |
+| bandwidthNorm | Hub |fEnd-fStart| |
+| slopeNorm | Frequenzhub pro Sample (Vorzeichen = Richtung; in Hz/s: slopeNorm * fs²) |
+| snrDb, r2 | SNR und Bestimmtheitsmaß des Chirp-Fits |
+| up | true = aufwärts, false = abwärts |
+
+`SymbolStream extractSymbols(F)` — Symbol-Schnittstelle für die spätere
+Symbolgewinnung; PSK-Signale liefern `symbols` (wie `synchronizePsk`),
+FSK2 liefert `symbolFreqs` (Momentanfrequenz pro Symbolzentrum) und
+`fskTone` (Ton-Entscheidung 0/1). `type` ist BPSK/QPSK bzw. FSK2.
+
+| Feld | Bedeutung |
+|---|---|
+| sps / timingOffset | Symboltakt und erste Symbolzeit relativ zu `startSampleFine` |
+| carrierFreqNorm | PSK: Träger [0,1); FSK2: Pulsmitte |
+| carrierPhaseAtStart | PSK: Trägerphase am Pulsanfang (rad); FSK2: 0 |
+| symbols | PSK: derotierte Symbole |
+| symbolFreqs / fskTone | FSK2: Frequenz bzw. Ton (0/1) pro Symbol |
 
 ## ClassifierConfig
 
@@ -132,9 +193,11 @@ gegen die Testsuite.
 
 ## Schwellwerte anpassen
 
-- Schwaches SNR-Regime: minSnrDb senken, gleichzeitig tCpPeak/tRsProm
-  herabsetzen und die QAM-Dichte-Fallback-Schwelle qamDenseSnr an das
-  reale SNR-Regime anpassen.
+- Schwaches SNR-Regime: Default minSnrDb = 2 dB deckt Detektion ab ~2 dB
+  (CW/Chirp) bzw. ~3-4 dB (breitbandige PSK/QAM) ab. Noch darunter:
+  minSnrDb weiter senken, gleichzeitig tCpPeak/tRsProm herabsetzen und
+  die QAM-Dichte-Fallback-Schwelle qamDenseSnr an das reale SNR-Regime
+  anpassen.
 - Kürzere Pulse als 400 Samples: minPulseLen senken und die Testsuite
   um derartige Szenarien erweitern (die Kalibrierung gilt für die
   getesteten Pulslängen).

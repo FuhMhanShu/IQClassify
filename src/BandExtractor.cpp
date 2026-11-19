@@ -99,6 +99,38 @@ BandExtractor::BandDetection BandExtractor::bands(const std::complex<double>* x,
         else
             mr.push_back(r);
     }
+    // Low-SNR-Bruecke: Liegt das mittlere PSD in der Luecke zwischen zwei
+    // Laeufen noch klar ueber dem Rauschboden, enthaelt die Luecke Signal
+    // (kein Rauschen) -> verschmelzen. So bleibt ein breitbandiger Puls auch
+    // bei ~2 dB SNR ein einziges Band, waehrend echte Rauschluecken (Mittel
+    // auf Boden) zwei Pulse getrennt halten.
+    {
+        bool changed = mr.size() > 1;
+        while (changed) {
+            changed = false;
+            std::size_t i = 0;
+            while (i + 1 < mr.size()) {
+                const long gapLo = mr[i].second;
+                const long gapHi = mr[i + 1].first;
+                if (gapHi - gapLo > 0) {
+                    double s = 0.0;
+                    long c = 0;
+                    for (long g = gapLo; g < gapHi; ++g) {
+                        s += psdDb[(qb + 1 + static_cast<std::size_t>(g)) % nft];
+                        ++c;
+                    }
+                    if (c > 0 &&
+                        s / static_cast<double>(c) > floorDb + cfg.bandBridgeDb) {
+                        mr[i].second = mr[i + 1].second;
+                        mr.erase(mr.begin() + i + 1);
+                        changed = true;
+                        continue;
+                    }
+                }
+                ++i;
+            }
+        }
+    }
     std::vector<Band> bands;
     for (const auto& r : mr) {
         long lo = static_cast<long>(qb) + 1 + r.first;
