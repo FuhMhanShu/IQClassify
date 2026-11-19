@@ -63,6 +63,38 @@ double wrap01(double f) {
     return f;
 }
 
+// Skaliert die sample-basierten Schwellwerte fuer einen um D dezimierten
+// Kanal (die Folgestufen sehen den Kanal mit Rate 1/D); symbol- und
+// verhaeltnisbasierte Groessen bleiben unveraendert.
+ClassifierConfig scaleForDecimation(const ClassifierConfig& c,
+                                    std::size_t D) {
+    if (D <= 1) return c;
+    ClassifierConfig r = c;
+    const auto sd = [D](std::size_t v) {
+        const std::size_t q = v / D;
+        return q > 0 ? q : 1;
+    };
+    const auto sl = [D](long v) {
+        const long q = v / static_cast<long>(D);
+        return q > 0 ? q : 1;
+    };
+    r.segWin = sd(c.segWin);
+    r.segFloorGroup = sd(c.segFloorGroup);
+    r.segMargin = sd(c.segMargin);
+    r.minPulseLen = sd(c.minPulseLen);
+    r.detectWin = sd(c.detectWin);
+    r.tBwCwBins = sd(c.tBwCwBins);
+    r.ofdmTauMin = sl(c.ofdmTauMin);
+    r.ofdmTauMax = sl(c.ofdmTauMax);
+    r.ofdmMinBandBins = sd(c.ofdmMinBandBins);
+    r.tCpMinTau = sl(c.tCpMinTau);
+    r.cpCleanWin = sl(c.cpCleanWin);
+    r.cpHalfTol = sl(c.cpHalfTol);
+    r.cpIsolation = sl(c.cpIsolation);
+    r.satMergeMin = sl(c.satMergeMin);
+    return r;
+}
+
 // --------------------------------------------------------------------------
 // zyklische Praefix-Evidenz (OFDM)
 // --------------------------------------------------------------------------
@@ -812,7 +844,206 @@ void sanitizeSlice(std::vector<cd>& y) {
 // --------------------------------------------------------------------------
 std::vector<PulseResult> ModulationClassifier::classify(
     const std::complex<double>* iq, std::size_t n) const {
-    const ClassifierConfig& cfg = cfg_;
+    // Erster Pipelineschritt: spektrale Kanalisierung (Kanaele um die
+    // detektierten Energiebereiche), sofern in der Konfiguration aktiv.
+    if (cfg_.channelize) return classifyChannelized(cfg_, iq, n);
+    return classifyLegacy(cfg_, iq, n);
+}
+
+std::vector<PulseResult> ModulationClassifier::classifyChannelized(
+    const ClassifierConfig& cfg, const std::complex<double>* iq,
+    std::size_t n) const {
+    std::vector<PulseResult> results;
+    // Haertung: leere Eingabe und Nullzeiger sind definiert leer.
+    if (iq == nullptr || n == 0) return results;
+    const BandExtractor bxs(cfg);
+    // Erster Pipelineschritt: spektrale Kanalisierung auf dem ganzen Puffer.
+    // Die Kanaele sind die detektierten Energiebereiche des Spektrums (nicht
+    // gleichverteilt, sondern um die Stellen mit Energie gelegt).
+    const BandExtractor::BandDetection det0 = bxs.bands(iq, 0, n);
+    std::vector<Band> chans = det0.bands;
+    if (chans.empty())
+        chans.push_back(Band{0, static_cast<long>(det0.nft)});
+    // Zeitsegmente global ueber die Gesamtenergie des Puffers.
+    const PulseSegmenter seg(cfg);
+    const std::vector<std::pair<std::size_t, std::size_t>> segs =
+        seg.detect(iq, n);
+    // Pro Segment: Detektion (mit korrektem Rauschboden des Originals) und
+    // Zuordnung jedes Segment-Bandes zum ueberlappenden Kanal.
+    struct SegDet {
+        std::size_t a = 0;
+        std::size_t b = 0;
+        BandExtractor::BandDetection det;
+        std::vector<Band> bands;
+        std::vector<std::size_t> owner;
+    };
+    std::vector<SegDet> sd(segs.size());
+    for (std::size_t i = 0; i < segs.size(); ++i) {
+        sd[i].a = segs[i].first;
+        sd[i].b = segs[i].second;
+        sd[i].det = bxs.bands(iq, sd[i].a, sd[i].b);
+        sd[i].bands = sd[i].det.bands;
+        if (sd[i].bands.empty())
+            sd[i].bands.push_back(
+                Band{0, static_cast<long>(sd[i].det.nft)});
+        // Kanalraster (det0) ins Segmentraster (detS) abbilden.
+        const long sc = static_cast<long>(det0.nft) /
+                        static_cast<long>(sd[i].det.nft);
+        for (const Band& bS : sd[i].bands) {
+            std::size_t owner = 0;
+            long bestOv = -1;
+            for (std::size_t j = 0; j < chans.size(); ++j) {
+                const Band cj{chans[j].lo / sc, chans[j].hi / sc};
+                const long ov = std::min(bS.hi, cj.hi) -
+                                std::max(bS.lo, cj.lo);
+                if (ov > bestOv) {
+                    bestOv = ov;
+                    owner = j;
+                }
+            }
+            sd[i].owner.push_back(owner);
+        }
+    }
+    // Folgestufen je Kanal: Baender des Kanals werden pro Zeitsegment
+    // extrahiert (Bandpass), auf die Bandmitte gemischt und optional
+    // resamplet (Dezimierung mit Anti-Alias-Filter); danach Crops,
+    // Merkmale und Stufe 1/2 auf dem Kanal-Basisband.
+    const std::size_t Dreq =
+        cfg.channelDecimate < 1
+            ? 1
+            : static_cast<std::size_t>(cfg.channelDecimate);
+    for (std::size_t ci = 0; ci < chans.size(); ++ci) {
+        for (const SegDet& s : sd) {
+            for (std::size_t bi = 0; bi < s.bands.size(); ++bi) {
+                if (s.owner[bi] != ci) continue;
+                const Band& bS = s.bands[bi];
+                double snrDb = 0.0;
+                double flatDb = 0.0;
+                estimateSnrFlat(s.det.psdDb, bS, cfg, s.bands, &snrDb,
+                                &flatDb);
+                BandExtractor::Slice slice =
+                    bxs.extract(iq, s.a, s.b, bS, s.det.nft);
+                // Resample-Faktor des Kanals (Nyquist der Bandbreite).
+                std::size_t D = 1;
+                if (Dreq > 1 && slice.bw > 0.0) {
+                    const double maxD = std::floor(1.0 / slice.bw);
+                    D = maxD >= 1.0 ? static_cast<std::size_t>(maxD) : 1;
+                    if (D > Dreq) D = Dreq;
+                }
+                std::vector<cd> y = slice.y;
+                if (D > 1) y = Channelizer::resample(y, D);
+                const ClassifierConfig c2 = scaleForDecimation(cfg, D);
+                processSlice(c2, y, s.a / D, slice.fc,
+                             slice.bw * static_cast<double>(D),
+                             static_cast<std::size_t>(bS.width()), snrDb,
+                             flatDb, s.det.psdDb, bS, s.det.nft, D,
+                             results);
+            }
+        }
+    }
+    std::sort(results.begin(), results.end(),
+              [](const PulseResult& a, const PulseResult& b) {
+                  return a.startSampleFine < b.startSampleFine;
+              });
+    return results;
+}
+
+void ModulationClassifier::processSlice(
+    const ClassifierConfig& cfg, const std::vector<cd>& sliceY,
+    std::size_t segA, double fcGlobal, double bwLocal, std::size_t bandBins,
+    double snrDb, double flatDb, const std::vector<double>& psdDb,
+    const Band& band, std::size_t detNft, std::size_t timeMul,
+    std::vector<PulseResult>& results) const {
+    for (const auto& crop : timeCrops(sliceY, cfg)) {
+        const std::size_t c0 = crop.first;
+        const std::size_t c1 = crop.second;
+        const std::size_t len = c1 - c0;
+        if (len < cfg.minPulseLen) continue;
+        std::vector<cd> ys(sliceY.begin() + static_cast<std::ptrdiff_t>(c0),
+                           sliceY.begin() + static_cast<std::ptrdiff_t>(c1));
+        // Haertung: nicht-endliche Samples als Null behandeln.
+        // NaN/Inf duerfen weder Statistiken vergiften noch in
+        // Indexumrechnungen einfliessen; ein Dropout verhaelt
+        // sich damit wie Stille. (Konsistent mit dem Oracle.)
+        for (cd& v : ys) {
+            if (!std::isfinite(v.real()) || !std::isfinite(v.imag()))
+                v = cd(0.0, 0.0);
+        }
+        const Features f =
+            extractFeatures(ys, 0.0, bwLocal, bandBins, snrDb, flatDb, cfg);
+        CoarseClass coarse = CoarseClass::Unknown;
+        if (!stage1(f, cfg, &coarse)) continue;
+        const auto res = stage2(f, cfg, coarse, ys);
+        // Feine Zeitlage (samplegenau): Huellkurven-Schwelle im
+        // Crop, relativ zum Crop-Maximum. Die Raender des Crops
+        // (Sicherheitsrand, Blockraster) fallen darunter weg.
+        std::size_t i0 = 0;
+        std::size_t i1 = ys.size();
+        {
+            double emax = 0.0;
+            for (const cd& v : ys) emax = std::max(emax, std::abs(v));
+            if (emax > 0.0 && ys.size() > 2) {
+                const double thr = 0.25 * emax;
+                std::size_t a0 = 0;
+                while (a0 < ys.size() && std::abs(ys[a0]) <= thr) ++a0;
+                std::size_t a1 = ys.size();
+                while (a1 > a0 && std::abs(ys[a1 - 1]) <= thr) --a1;
+                if (a1 > a0) {
+                    i0 = a0;
+                    i1 = a1;
+                }
+            }
+        }
+        // Sub-Bin-Mittenfrequenz: leistungsgewichteter Schwerpunkt des
+        // In-Band-PSD (zyklische Bins ab band.lo), globale Koordinaten.
+        double fcRef = wrap01(fcGlobal);
+        {
+            const long nftL = static_cast<long>(detNft);
+            if (nftL > 0 && !psdDb.empty() && band.width() > 0) {
+                double num = 0.0;
+                double den = 0.0;
+                for (long k = band.lo; k < band.hi; ++k) {
+                    const long kk = ((k % nftL) + nftL) % nftL;
+                    const double p = std::pow(
+                        10.0, psdDb[static_cast<std::size_t>(kk)] / 10.0);
+                    num += static_cast<double>(k - band.lo) * p;
+                    den += p;
+                }
+                if (den > 0.0) {
+                    fcRef = wrap01((static_cast<double>(band.lo) + num / den) /
+                                   static_cast<double>(detNft));
+                }
+            }
+        }
+        PulseResult r;
+        r.startSample = (segA + c0) * timeMul;
+        r.numSamples = len * timeMul;
+        r.startSampleFine = (segA + c0 + i0) * timeMul;
+        r.numSamplesFine = (i1 - i0) * timeMul;
+        r.centerFreqRefined = fcRef;
+        r.centerFreqNorm =
+            static_cast<float>(roundTo(wrap01(fcGlobal), 5));
+        r.bandwidthNorm = static_cast<float>(
+            roundTo(bwLocal / static_cast<double>(timeMul), 5));
+        r.snrDb = static_cast<float>(roundTo(f.snrDb, 1));
+        r.coarse = coarse;
+        r.modulation = res.first;
+        r.confidence = static_cast<float>(roundTo(res.second, 2));
+        r.envelopeCv = static_cast<float>(roundTo(f.cv, 3));
+        r.paprWindowedDb = static_cast<float>(roundTo(f.paprWDb, 1));
+        r.chirpR2 = static_cast<float>(roundTo(f.chirpR2, 2));
+        r.chirpSweep = static_cast<float>(f.chirpSweep);
+        r.dwellFraction = static_cast<float>(roundTo(f.dwell, 2));
+        r.freqModes = f.nfreqModes;
+        r.spectralFlatnessDb = static_cast<float>(roundTo(f.flatDb, 2));
+        r.bandBins = bandBins / timeMul;
+        results.push_back(r);
+    }
+}
+
+std::vector<PulseResult> ModulationClassifier::classifyLegacy(
+    const ClassifierConfig& cfg, const std::complex<double>* iq,
+    std::size_t n) const {
     std::vector<PulseResult> results;
     // Haertung: leere Eingabe und Nullzeiger sind definiert leer.
     if (iq == nullptr || n == 0) return results;
@@ -829,111 +1060,12 @@ std::vector<PulseResult> ModulationClassifier::classify(
         for (const Band& band : bands) {
             const BandExtractor::Slice slice =
                 bxs.extract(iq, a, b, band, det.nft);
-            for (const auto& crop : timeCrops(slice.y, cfg)) {
-                const std::size_t c0 = crop.first;
-                const std::size_t c1 = crop.second;
-                const std::size_t len = c1 - c0;
-                if (len < cfg.minPulseLen) continue;
-                std::vector<cd> ys(slice.y.begin() +
-                                       static_cast<std::ptrdiff_t>(c0),
-                                   slice.y.begin() +
-                                       static_cast<std::ptrdiff_t>(c1));
-                // Haertung: nicht-endliche Samples als Null behandeln.
-                // NaN/Inf duerfen weder Statistiken vergiften noch in
-                // Indexumrechnungen einfliessen; ein Dropout verhaelt
-                // sich damit wie Stille. (Konsistent mit dem Oracle.)
-                for (cd& v : ys) {
-                    if (!std::isfinite(v.real()) ||
-                        !std::isfinite(v.imag())) {
-                        v = cd(0.0, 0.0);
-                    }
-                }
-                double snrDb = 0.0;
-                double flatDb = 0.0;
-                estimateSnrFlat(det.psdDb, band, cfg, bands, &snrDb,
-                                &flatDb);
-                const Features f =
-                    extractFeatures(ys, slice.fc, slice.bw,
-                                    static_cast<std::size_t>(band.width()),
-                                    snrDb, flatDb, cfg);
-                CoarseClass coarse = CoarseClass::Unknown;
-                if (!stage1(f, cfg, &coarse)) continue;
-                const auto res = stage2(f, cfg, coarse, ys);
-                // Feine Zeitlage (samplegenau): Huellkurven-Schwelle im
-                // Crop, relativ zum Crop-Maximum. Die Raender des Crops
-                // (Sicherheitsrand, Blockraster) fallen darunter weg.
-                std::size_t i0 = 0;
-                std::size_t i1 = ys.size();
-                {
-                    double emax = 0.0;
-                    for (const cd& v : ys)
-                        emax = std::max(emax, std::abs(v));
-                    if (emax > 0.0 && ys.size() > 2) {
-                        const double thr = 0.25 * emax;
-                        std::size_t a0 = 0;
-                        while (a0 < ys.size() && std::abs(ys[a0]) <= thr)
-                            ++a0;
-                        std::size_t a1 = ys.size();
-                        while (a1 > a0 && std::abs(ys[a1 - 1]) <= thr)
-                            --a1;
-                        if (a1 > a0) {
-                            i0 = a0;
-                            i1 = a1;
-                        }
-                    }
-                }
-                // Sub-Bin-Mittenfrequenz: leistungsgewichteter
-                // Schwerpunkt des In-Band-PSD (zyklische Bins ab band.lo).
-                double fcRef = wrap01(slice.fc);
-                {
-                    const long nftL = static_cast<long>(det.nft);
-                    if (nftL > 0 && !det.psdDb.empty() &&
-                        band.width() > 0) {
-                        double num = 0.0;
-                        double den = 0.0;
-                        for (long k = band.lo; k < band.hi; ++k) {
-                            const long kk = ((k % nftL) + nftL) % nftL;
-                            const double p =
-                                std::pow(10.0, det.psdDb[static_cast<
-                                    std::size_t>(kk)] / 10.0);
-                            num += static_cast<double>(k - band.lo) * p;
-                            den += p;
-                        }
-                        if (den > 0.0) {
-                            fcRef = wrap01(
-                                (static_cast<double>(band.lo) + num / den) /
-                                static_cast<double>(det.nft));
-                        }
-                    }
-                }
-                PulseResult r;
-                r.startSample = a + c0;
-                r.numSamples = len;
-                r.startSampleFine = a + c0 + i0;
-                r.numSamplesFine = i1 - i0;
-                r.centerFreqRefined = fcRef;
-                r.centerFreqNorm = static_cast<float>(
-                    roundTo(wrap01(slice.fc), 5));
-                r.bandwidthNorm =
-                    static_cast<float>(roundTo(slice.bw, 5));
-                r.snrDb = static_cast<float>(roundTo(f.snrDb, 1));
-                r.coarse = coarse;
-                r.modulation = res.first;
-                r.confidence =
-                    static_cast<float>(roundTo(res.second, 2));
-                r.envelopeCv = static_cast<float>(roundTo(f.cv, 3));
-                r.paprWindowedDb =
-                    static_cast<float>(roundTo(f.paprWDb, 1));
-                r.chirpR2 = static_cast<float>(roundTo(f.chirpR2, 2));
-                r.chirpSweep = static_cast<float>(f.chirpSweep);
-                r.dwellFraction =
-                    static_cast<float>(roundTo(f.dwell, 2));
-                r.freqModes = f.nfreqModes;
-                r.spectralFlatnessDb =
-                    static_cast<float>(roundTo(f.flatDb, 2));
-                r.bandBins = static_cast<std::size_t>(band.width());
-                results.push_back(r);
-            }
+            double snrDb = 0.0;
+            double flatDb = 0.0;
+            estimateSnrFlat(det.psdDb, band, cfg, bands, &snrDb, &flatDb);
+            processSlice(cfg, slice.y, a, slice.fc, slice.bw,
+                         static_cast<std::size_t>(band.width()), snrDb, flatDb,
+                         det.psdDb, band, det.nft, 1, results);
         }
     }
     return results;

@@ -13,6 +13,20 @@
 namespace iqclassify {
 
 struct ClassifierConfig {
+    // ---- Spektrale Kanalisierung (erster Pipelineschritt)
+    bool channelize = true;   // Spektrum zuerst in Kanaele zerlegen, die sich
+                              // um die detektierten Energiebereiche legen (je
+                              // Band ein Kanal um dessen Energieschwerpunkt);
+                              // erst danach laeuft je Kanal die weitere Pipeline
+                              // (Zeitsegmentierung, Crops, Merkmale, Stufe 1/2).
+                              // false = Legacy-Pfad (erst Zeitsegmentierung, dann
+                              // Banddetektion je Segment)
+    int channelDecimate = 1;  // Resample-Faktor je Kanal (1 = volle Abtastrate);
+                              // wird pro Kanal auf <= floor(1/Kanalbreite)
+                              // begrenzt; sample-basierte Schwellwerte der
+                              // Folgestufen werden entsprechend skaliert und die
+                              // Ergebnisse zurueckgerechnet
+
     // ---- Pulssegmentierung (Energie im Block)
     std::size_t segWin = 64;        // Blocklaenge / Energie-Fenster
     std::size_t segFloorGroup = 16; // Bloecke pro Rauschboden-Gruppe

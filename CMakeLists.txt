@@ -18,6 +18,7 @@ option(IQCLASSIFY_BUILD_TESTS "Testsuite von IQClassify bauen" ON)
 # einzige Abhaengigkeit und wird privat in src/Dsp.cpp eingebunden.
 add_library(IQClassify STATIC
     src/BandExtractor.cpp
+    src/Channelizer.cpp
     src/Classifier.cpp
     src/Dsp.cpp
     src/FeatureExtractor.cpp

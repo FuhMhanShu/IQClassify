@@ -18,6 +18,7 @@ HEADERS += \
     include/iqclassify/Dsp.hpp \
     include/iqclassify/PulseSegmenter.hpp \
     include/iqclassify/BandExtractor.hpp \
+    include/iqclassify/Channelizer.hpp \
     include/iqclassify/FeatureExtractor.hpp \
     include/iqclassify/Classifier.hpp \
     third_party/pocketfft/pocketfft_hdronly.h
@@ -26,6 +27,7 @@ SOURCES += \
     src/Dsp.cpp \
     src/PulseSegmenter.cpp \
     src/BandExtractor.cpp \
+    src/Channelizer.cpp \
     src/FeatureExtractor.cpp \
     src/Classifier.cpp
 

@@ -158,10 +158,54 @@ FSK2 liefert `symbolFreqs` (Momentanfrequenz pro Symbolzentrum) und
 | symbols | PSK: derotierte Symbole |
 | symbolFreqs / fskTone | FSK2: Frequenz bzw. Ton (0/1) pro Symbol |
 
+## Channelizer (spektrale Kanalisierung)
+
+Erster Pipelineschritt: das Spektrum wird in Kanäle zerlegt, die sich **nicht
+gleichverteilt, sondern um die detektierten Energiebereiche** legen — eine
+Banddetektion auf dem ganzen Puffer findet die Energiebereiche, und um jeden
+Bereich wird ein Kanal gelegt (zentriert auf dessen leistungsgewichteten
+Schwerpunkt, so breit wie der Bereich inkl. Waechter).
+
+    class Channelizer {
+    public:
+        struct Channel {
+            std::vector<std::complex<double>> y;  // Kanal-Basisband
+            double centerNorm;   // Kanalmitte, zyklisch [0,1) der Originalrate
+            double widthNorm;    // Kanalbreite inkl. Waechter (Originalrate)
+            Band band;           // Kanalband in nft-Bin-Koordinaten
+            std::size_t nft;     // FFT-Laenge des Puffers
+            std::size_t decimate;// Resample-Faktor des Kanals
+        };
+        std::vector<Channel> channelize(const std::complex<double>* iq,
+                                        std::size_t n,
+                                        std::size_t decimate = 1) const;
+        Channel extract(const std::complex<double>* iq, std::size_t n,
+                        const Band& band, std::size_t nft,
+                        std::size_t decimate = 1) const;
+        static std::vector<std::complex<double>> resample(
+            const std::vector<std::complex<double>>& y, std::size_t D);
+    };
+
+- `channelize` liefert alle Kanäle: jeder Kanal ist extrahiert (Bandpass per
+  FFT-Maske + IFFT), auf seine Mitte heruntergemischt und optional resamplet.
+  `decimate` wird pro Kanal auf `floor(1/Kanalbreite)` begrenzt (Nyquist).
+- `extract` liefert einen einzelnen Kanal; `resample` ist der Anti-Alias-
+  Tiefpass (Hann-Sinc) + Dezimierung (symmetrisch, zero delay).
+- Bei `decimate = D` hat `ch.y` die Länge `ceil(n/D)`; `ch.y[m]` entspricht
+  `iq[m*D]`, frequenzverschoben auf `ch.centerNorm`. Umkehrung:
+  `iq[m*D] ≈ ch.y[m] * e^{+j*2pi*centerNorm*m*D}`.
+- `ModulationClassifier::classify` nutzt dieselbe Kanalisierung intern als
+  ersten Schritt (`ClassifierConfig::channelize`, Default an) und rechnet
+  alle Ergebnisse in die Koordinaten des Originalsignals zurück
+  (Zeit ×D, Frequenz = Kanalmitte + lokal/D zyklisch). Mit
+  `channelDecimate > 1` werden die Kanäle in `classify` vor der
+  Merkmalsextraktion dezimiert (sample-basierte Schwellwerte werden skaliert,
+  Ergebnisse zurückgerechnet).
+
 ## ClassifierConfig
 
 Alle Schwellwerte der Referenzvalidierung, gruppiert wie in
-docs/METHODOLOGY.md (Pulssegmentierung, Banddetektion, SNR/Stufe 1,
+docs/METHODOLOGY.md (Kanalisierung, Pulssegmentierung, Banddetektion, SNR/Stufe 1,
 OFDM-Präfix, Symboltiming, Phasenanalyse, QAM-Ordnung). Jedes Feld ist
 in include/Config.hpp individuell kommentiert. Standardwerte entsprechen der
 validierten Kalibrierung; Änderungen erfordern eine erneute Validierung

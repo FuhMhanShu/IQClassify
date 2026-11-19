@@ -23,6 +23,20 @@ Sind zwei Pulse sowohl zeitlich als auch spektral überlappt (gleiche
 Frequenzlage), sind sie physikalisch nicht trennbar und werden als ein
 Puls klassifiziert; dies ist eine dokumentierte Grenze, kein Fehler.
 
+## Spektrale Kanalisierung (erster Pipelineschritt)
+
+Die Pipeline beginnt mit einer spektralen Kanalisierung: das Spektrum wird in
+Kanäle zerlegt, die sich nicht gleichverteilt, sondern um die Bereiche im
+Spektrum legen, in denen Energie detektiert wurde (adaptive Kanäle, je
+Energiebereich ein Kanal um dessen Energieschwerpunkt). Jeder Kanal wird
+einzeln untersucht: extrahiert (Bandpass), auf seine Mitte heruntergemischt
+und optional resamplet (dezimiert mit Anti-Alias-Filter). Die Folgemodule
+(Zeitsegmentierung, Banddetektion, Merkmale, Klassifikation) laufen pro
+Kanal; alle Ergebnisse beziehen sich auf das Originalsignal (Zeit in
+Original-Samples, Frequenzen zyklisch in [0,1) der Originalrate). Über
+`Channelizer` sind die Kanal-Basisbänder auch direkt zugreifbar
+(`channelize`/`extract`/`resample`).
+
 ## Lokalisierung
 
 Jeder erkannte Puls muss im IQ-Signal wiederfindbar sein:

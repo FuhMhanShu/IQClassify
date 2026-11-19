@@ -25,6 +25,9 @@
 //      klassifiziert (Default-Gate minSnrDb=2, Low-SNR-Bruecke im Banddetektor)
 //  15. Analyse-API: PSK-Synchronisation (phasenrichtiger Pulsanfang ohne
 //      Clocksync-Einschwingen), Chirp-Parameter, Symbol-Schnittstelle PSK/FSK
+//  16. Spektrale Kanalisierung (erster Pipelineschritt): adaptive Kanaele um
+//      die Energiebereiche, Extract/Mix/Resample je Kanal, Aequivalenz zum
+//      Legacy-Pfad, Resampling in classify, breiter Chirp bleibt ein Puls
 //
 // Ein Szenario besteht genau dann den Test, wenn die sortierte Labelmenge
 // der erkannten Pulse der erwarteten entspricht. Fuer
@@ -1171,6 +1174,180 @@ int main() {
                             "api-invalid-on-cw");
             } else {
                 std::printf("[FAIL] %-24s\n", "api-invalid-on-cw");
+            }
+        }
+    }
+    // 16. Spektrale Kanalisierung: adaptive Kanaele um die Energiebereiche.
+    {
+        // QPSK@0.15 und CW@-0.20 gleichzeitig: zwei Kanaele um die
+        // Energiebereiche, Mitten nahe den wahren fc.
+        std::mt19937 rng(11);
+        iqtest::Recorder rec;
+        rec.silence(2000);
+        rec.add(iqtest::genPsk(rng, 4, 400, 8), 0.15, 20.0);
+        rec.add(iqtest::genCw(rng, 3000), -0.20, 20.0, 2000);
+        rec.silence(2000);
+        const std::vector<iqtest::cd>& buf = rec.buffer();
+        ++g_total;
+        {
+            iqclassify::ClassifierConfig cfg;
+            iqclassify::Channelizer chz(cfg);
+            const auto chans =
+                chz.channelize(buf.data(), buf.size(), 1);
+            bool ok = chans.size() == 2;
+            bool hasQ = false;
+            bool hasC = false;
+            for (const auto& ch : chans) {
+                if (ch.y.size() != buf.size()) ok = false;
+                if (cycDist(ch.centerNorm, 0.15) < 0.03) hasQ = true;
+                if (cycDist(ch.centerNorm, 0.80) < 0.03) hasC = true;
+            }
+            ok = ok && hasQ && hasC;
+            if (ok) {
+                ++g_ok;
+                std::printf("[OK ] %-24s nchan=%zu (%.4f, %.4f)\n",
+                            "chan-centers", chans.size(), chans[0].centerNorm,
+                            chans[1].centerNorm);
+            } else {
+                std::printf("[FAIL] %-24s nchan=%zu hasQ=%d hasC=%d\n",
+                            "chan-centers", chans.size(), (int)hasQ, (int)hasC);
+            }
+        }
+        // Extract/Mix: im CW-Kanal liegt der Ton nahe DC (Mittenfrequenz ~0).
+        ++g_total;
+        {
+            iqclassify::ClassifierConfig cfg;
+            iqclassify::Channelizer chz(cfg);
+            const auto chans = chz.channelize(buf.data(), buf.size(), 1);
+            bool ok = false;
+            for (const auto& ch : chans) {
+                if (cycDist(ch.centerNorm, 0.80) >= 0.03) continue;
+                iqtest::cd acc(0.0, 0.0);
+                for (std::size_t i = 2000; i + 1 < 5000 && i + 1 < ch.y.size();
+                     ++i)
+                    acc += ch.y[i + 1] * std::conj(ch.y[i]);
+                const double f = std::arg(acc) / (2.0 * M_PI);
+                if (std::fabs(f) < 0.02) {
+                    ok = true;
+                    ++g_ok;
+                    std::printf("[OK ] %-24s CW im Kanal nahe DC (f_inst=%.5f)\n",
+                                "chan-extract-mix", f);
+                    break;
+                }
+            }
+            if (!ok) {
+                std::printf("[FAIL] %-24s Ton nicht nahe DC im Kanal\n",
+                            "chan-extract-mix");
+            }
+        }
+        // Resample: Kanal mit decimate=4 -> Laenge n/4, Puls weiterhin da.
+        ++g_total;
+        {
+            iqclassify::ClassifierConfig cfg;
+            iqclassify::Channelizer chz(cfg);
+            const auto chans = chz.channelize(buf.data(), buf.size(), 1);
+            bool ok = false;
+            for (const auto& ch : chans) {
+                if (cycDist(ch.centerNorm, 0.80) >= 0.03) continue;
+                auto ch4 = chz.extract(buf.data(), buf.size(), ch.band,
+                                      ch.nft, 4);
+                double e = 0.0;
+                for (std::size_t m = 500; m < 1250 && m < ch4.y.size(); ++m)
+                    e += std::norm(ch4.y[m]);
+                ok = ch4.decimate == 4 &&
+                     ch4.y.size() == (buf.size() + 3) / 4 && e > 100.0;
+                if (ok) break;
+            }
+            if (ok) {
+                ++g_ok;
+                std::printf("[OK ] %-24s decimate=4 -> Laenge n/4, Puls drin\n",
+                            "chan-resample");
+            } else {
+                std::printf("[FAIL] %-24s Resample-Faktor/Laenge/Puls\n",
+                            "chan-resample");
+            }
+        }
+        // Aequivalenz: kanalisierter Default-Pfad == Legacy-Pfad (Labels).
+        ++g_total;
+        {
+            std::mt19937 rng2(7);
+            iqtest::Recorder rec2;
+            rec2.silence(2000);
+            rec2.add(iqtest::genPsk(rng2, 4, 400, 8), 0.05, 20.0);
+            rec2.silence(2000);
+            rec2.add(iqtest::genFsk2(rng2, 400, 8), -0.05, 20.0);
+            rec2.silence(2000);
+            rec2.add(iqtest::genCw(rng2, 3000), 0.15, 20.0);
+            rec2.silence(2000);
+            const std::vector<iqtest::cd>& b2 = rec2.buffer();
+            iqclassify::ClassifierConfig cOn;   // Default: channelize = true
+            iqclassify::ClassifierConfig cOff;
+            cOff.channelize = false;
+            auto lab = [&](const iqclassify::ClassifierConfig& c) {
+                iqclassify::ModulationClassifier clf(c);
+                const auto res = clf.classify(b2.data(), b2.size());
+                std::vector<std::string> l;
+                for (const auto& r : res)
+                    l.push_back(iqclassify::toString(r.modulation));
+                return joinLabels(l);
+            };
+            const std::string a = lab(cOn);
+            const std::string b = lab(cOff);
+            const bool ok = a == b && a == "FSK2/QPSK/Unmodulated";
+            if (ok) {
+                ++g_ok;
+                std::printf("[OK ] %-24s channelized==legacy: %s\n",
+                            "chan-eq-legacy", a.c_str());
+            } else {
+                std::printf("[FAIL] %-24s chan=%s legacy=%s\n",
+                            "chan-eq-legacy", a.c_str(), b.c_str());
+            }
+        }
+        // Resampling in classify (channelDecimate=2): gleiche Labels.
+        ++g_total;
+        {
+            iqclassify::ClassifierConfig cfg;
+            cfg.channelDecimate = 2;
+            iqclassify::ModulationClassifier clf(cfg);
+            const auto res = clf.classify(buf.data(), buf.size());
+            std::vector<std::string> l;
+            for (const auto& r : res)
+                l.push_back(iqclassify::toString(r.modulation));
+            const std::string got = joinLabels(l);
+            const bool ok = got == "QPSK/Unmodulated" && res.size() == 2;
+            if (ok) {
+                ++g_ok;
+                std::printf("[OK ] %-24s channelDecimate=2: %s\n",
+                            "chan-decimate-classify", got.c_str());
+            } else {
+                std::printf("[FAIL] %-24s got=%s n=%zu\n",
+                            "chan-decimate-classify", got.c_str(), res.size());
+            }
+        }
+        // Breiter Chirp (Hub 0.40, wuerde gleichverteilte Kanaele zerteilen):
+        // adaptiver Kanal deckt den ganzen Hub ab -> genau ein Puls.
+        ++g_total;
+        {
+            std::mt19937 rng3(31);
+            iqtest::Recorder rec3;
+            rec3.silence(2000);
+            rec3.add(iqtest::genChirp(4000, 0.40, true), 0.0, 20.0);
+            rec3.silence(2000);
+            iqclassify::ClassifierConfig cfg;
+            iqclassify::ModulationClassifier clf(cfg);
+            const auto res =
+                clf.classify(rec3.buffer().data(), rec3.buffer().size());
+            const bool ok = res.size() == 1 &&
+                            res[0].modulation ==
+                                iqclassify::ModulationType::Chirp;
+            if (ok) {
+                ++g_ok;
+                std::printf("[OK ] %-24s breiter Chirp = 1 Puls (%s)\n",
+                            "chan-chirp-wide", iqclassify::toString(res[0].modulation));
+            } else {
+                std::printf("[FAIL] %-24s n=%zu\n", "chan-chirp-wide",
+                            res.size());
+                for (const auto& r : res) printPulse(r);
             }
         }
     }

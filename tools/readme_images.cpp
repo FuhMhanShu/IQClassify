@@ -347,15 +347,15 @@ void renderPipeline(const std::string& outDir) {
     const int y1 = 70, y2 = 230;
     const Box row1[] = {
         {20, y1, bw, bh, "IQ-PUFFER", "KOMPLEXER ABTASTSTROM I/Q", blue, lblue},
-        {314, y1, bw, bh, "0 SEGMENTIERUNG", "BLOCKENERGIE, HYSTERESE, BODEN", blue, lblue},
-        {608, y1, bw, bh, "1 BANDDETEKTION", "MAX-HOLD-PSD, BAENDER, SATELLITEN", blue, lblue},
-        {902, y1, bw, bh, "EXTRAKTION", "BANDMASKE, DC-VERSCHIEBUNG, IFFT", blue, lblue},
+        {314, y1, bw, bh, "0 KANALISIERUNG", "KANAELE UM ENERGIEBEREICHE", blue, lblue},
+        {608, y1, bw, bh, "1 SEGMENTIERUNG", "BLOCKENERGIE, HYSTERESE, BODEN", blue, lblue},
+        {902, y1, bw, bh, "2 BAND+EXTRAKTION", "MAX-HOLD-PSD, MASKE, MIX, RESAMPLE", blue, lblue},
     };
     const Box row2[] = {
-        {20, y2, bw, bh, "2 MERKMALE", "HUELLKURVE, F_INST, CHIRP-FIT, MODEN", green, lgreen},
-        {314, y2, bw, bh, "3 STUFE 1 (GROB)", "TON / FM / PM / FLACH (OFDM)", green, lgreen},
-        {608, y2, bw, bh, "4 STUFE 2 (FEIN)", "CW BPSK QPSK FSK2 CHIRP OFDM QAM", green, lgreen},
-        {902, y2, bw, bh, "PULSERESULT", "+ LOKALISIERUNG: FENSTER, F_REFINED", orange, lorange},
+        {20, y2, bw, bh, "3 MERKMALE", "HUELLKURVE, F_INST, CHIRP-FIT", green, lgreen},
+        {314, y2, bw, bh, "4 STUFE 1 (GROB)", "TON / FM / PM / FLACH (OFDM)", green, lgreen},
+        {608, y2, bw, bh, "5 STUFE 2 (FEIN)", "CW BPSK QPSK FSK2 CHIRP OFDM QAM", green, lgreen},
+        {902, y2, bw, bh, "PULSERESULT", "+ LOKALISIERUNG + ANALYSE-API", orange, lorange},
     };
     auto drawBox = [&](const Box& b) {
         c.fillRect(b.x, b.y, b.x + b.w - 1, b.y + b.h - 1, b.fill);

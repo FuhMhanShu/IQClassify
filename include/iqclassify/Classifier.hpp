@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "BandExtractor.hpp"
+#include "Channelizer.hpp"
 #include "Config.hpp"
 #include "FeatureExtractor.hpp"
 #include "Types.hpp"
@@ -83,6 +84,28 @@ public:
     const ClassifierConfig& config() const { return cfg_; }
 
 private:
+    // Legacy-Pfad: erst Zeitsegmentierung, dann Banddetektion je Segment.
+    std::vector<PulseResult> classifyLegacy(const ClassifierConfig& cfg,
+                                            const std::complex<double>* iq,
+                                            std::size_t n) const;
+    // Verarbeitet einen extrahierten Basisband-Slice (ein Band/Kanal) inkl.
+    // zeitlicher Crops; segA/timeMul rechnen die Zeitkoordinaten um,
+    // fcGlobal/bwLocal liefern Mittenfrequenz (global) und Bandbreite
+    // (lokale Rate) fuer Merkmale und Ergebnis.
+    void processSlice(const ClassifierConfig& cfg,
+                      const std::vector<std::complex<double>>& sliceY,
+                      std::size_t segA, double fcGlobal, double bwLocal,
+                      std::size_t bandBins, double snrDb, double flatDb,
+                      const std::vector<double>& psdDb, const Band& band,
+                      std::size_t detNft, std::size_t timeMul,
+                      std::vector<PulseResult>& results) const;
+    // Kanalisierter Pfad: erst spektrale Kanalisierung (Kanaele um die
+    // Energiebereiche), dann classifyLegacy je Kanal; Ergebnisse werden in
+    // die urspruenglichen Zeit-/Frequenzkoordinaten zurueckgerechnet.
+    std::vector<PulseResult> classifyChannelized(const ClassifierConfig& cfg,
+                                                 const std::complex<double>* iq,
+                                                 std::size_t n) const;
+
     ClassifierConfig cfg_;
 };
 

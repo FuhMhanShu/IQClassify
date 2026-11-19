@@ -11,5 +11,6 @@
 #include "Types.hpp"
 #include "PulseSegmenter.hpp"
 #include "BandExtractor.hpp"
+#include "Channelizer.hpp"
 #include "FeatureExtractor.hpp"
 #include "Classifier.hpp"

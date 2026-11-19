@@ -14,6 +14,12 @@ klassifiziert die Modulationsart jedes Pulses in zwei Stufen:
 
 ## Merkmale
 
+- Spektrale Kanalisierung als erster Pipelineschritt: die Kanaele sind nicht
+  gleichverteilt, sondern legen sich um die detektierten Energiebereiche im
+  Spektrum (adaptiv, je Bereich ein Kanal um dessen Energieschwerpunkt).
+  `Channelizer` extrahiert/mischt/resamplet jeden Kanal einzeln
+  (`channelize`/`extract`/`resample`); `classify` arbeitet intern pro Kanal
+  (`channelize` in `ClassifierConfig`, Resampling via `channelDecimate`).
 - Keine Abhaengigkeiten ausser PocketFFT (header-only, vendored unter
   `third_party/pocketfft/`).
 - Interne Rechnung in Doppelpraezision; Eingabe als `float` oder `double`.
@@ -34,7 +40,7 @@ klassifiziert die Modulationsart jedes Pulses in zwei Stufen:
   Symbol-Schnittstelle fuer PSK und FSK2 bereit.
 - Klassenkapselung: eine Fassade (`ModulationClassifier`), alle
   Schwellwerte konfigurierbar (`ClassifierConfig`).
-- Deterministische Testsuite ohne externes Testframework: 119 Szenarien
+- Deterministische Testsuite ohne externes Testframework: 125 Szenarien
   aus der Qualitaetsmatrix (SNR-Raster, Oversampling, Frequenzlagen,
   Chirp-Varianten, Pulslaengen, Mehrpuls, Seed-Streuung) plus
   Haertungsfaelle (Nullzeiger, leere und NaN-beladene Eingaben,
@@ -83,7 +89,19 @@ Einbindung in ein qmake-Konsumentenprojekt:
         // slice[k] == iq[pulse.startSampleFine + k], auf f0 verschoben
     }
 
-Alle Frequenzen sind auf die Abtastrate normiert (fs = 1).
+    // Spektrale Kanalisierung: Kanaele um die Energiebereiche des Spektrums,
+    // je Kanal extrahieren (Bandpass), auf die Kanalmitte mischen, resamplen:
+    iqclassify::Channelizer chz(cfg);
+    for (const auto& ch : chz.channelize(iq.data(), iq.size(), /*decimate=*/4)) {
+        // ch.centerNorm: Kanalmitte (zyklisch, fs normiert), ch.y: Basisband
+        // (Laenge n/4 bei decimate=4); ch.y[m] == iq[m*4], auf ch.centerNorm
+        // verschoben und tiefpassgefiltert (Anti-Alias vor der Dezimierung)
+    }
+
+Alle Frequenzen sind auf die Abtastrate normiert (fs = 1). Alle Ergebnisse
+(`PulseResult`, `PskSync`, `ChirpParams`, `SymbolStream`) beziehen sich auf
+das Originalsignal — Zeit in Samples des Originalpuffers, Frequenzen zyklisch
+in [0,1) der Originalabtastrate.
 
 ## Bilder
 

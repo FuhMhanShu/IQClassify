@@ -6,7 +6,33 @@ anschließend elementweise nach C++ portiert. Die Testsuite (tests/) deckt
 die Kalibrierungskonfigurationen ab.
 
 Verallgemeinerung: alle Frequenzen sind fraktional zur Abtastrate (fs = 1).
-Die Pipeline läuft in fünf Phasen.
+Die Pipeline läuft in fünf Phasen, beginnend mit der spektralen
+Kanalisierung.
+
+## Kanalisierung (erster Schritt, vor Phase 0)
+
+Das Spektrum des ganzen Puffers wird nicht gleichverteilt, sondern adaptiv
+in Kanäle zerlegt: die Banddetektion (Max-Hold-PSD über Hann-Teilfenster)
+findet die Energiebereiche, und um jeden Bereich wird ein Kanal gelegt,
+zentriert auf dessen leistungsgewichteten Schwerpunkt
+(`Channelizer::energyBands`). Jeder Kanal wird anschließend einzeln untersucht:
+
+- Extraktion: FFT des Puffers, Kanalmaske mit Wächtern, IFFT — der Kanal als
+  Zeitbereichssignal (`Channelizer::extract`).
+- Mischung: zyklische Verschiebung auf die Kanalmitte (Basisband des Kanals).
+- Resampling (optional, `channelDecimate`): Anti-Alias-Tiefpass
+  (Hann-Sinc, Grenzfrequenz 0.45/D, symmetrisch/zero-delay) + Dezimierung um
+  D; D wird pro Kanal auf floor(1/Kanalbreite) begrenzt (Nyquist).
+- `classify` arbeitet anschließend pro Kanal: Zeitsegmentierung und
+  Banddetektion laufen je Kanal, die Ergebnisse werden in die Koordinaten
+  des Originalsignals zurückgerechnet (Zeit ×D, Frequenz = Kanalmitte +
+  lokal/D zyklisch). Bei D > 1 werden die sample-basierten Schwellwerte der
+  Folgestufen durch D geteilt (`scaleForDecimation`).
+
+Weil die Kanäle sich um die Energiebereiche legen, bleibt ein breitbandiger
+Puls (z. B. Chirp mit Hub 0.40) in einem einzigen Kanal und wird nicht in
+Kanal-Fragmente zerlegt. Die öffentliche Schnittstelle
+(`Channelizer::channelize`) liefert die Kanal-Basisbänder direkt.
 
 ## Phase 0: Pulssegmentierung (Energie)
 
@@ -227,7 +253,7 @@ ist dort mit seiner Bedeutung kommentiert. Eine Änderung erfordert eine
 Die Referenzimplementierung führt die C++-Pipeline elementweise aus
 (äquivalente Arithmetik) und wurde gegen eine erweiterte Qualitätsmatrix
 aus 168 Szenarien gefahren. Die C++-Testsuite (tests/test_main.cpp,
-119 Szenarien) deckt den verifizierten robusten Bereich ab; jedes Szenario
+125 Szenarien) deckt den verifizierten robusten Bereich ab; jedes Szenario
 der Suite wurde in der Referenz über mindestens drei Seeds bestätigt.
 
 - Basiskalibrierung, SNR 20 dB, sps 8: 9/9 korrekt (BPSK, QPSK, FSK2,
@@ -262,6 +288,12 @@ der Suite wurde in der Referenz über mindestens drei Seeds bestätigt.
   der Symbole > 0.9), Chirp-Parameter up/down (fStart/fEnd auf 0.001,
   Steigung auf 15 %, r² > 0.99), FSK2-Symbole (Bit-Match 1.00),
   definierte invalid-Ergebnisse auf CW.
+- Kanalisierung (Abschnitt 16): adaptive Kanäle um die Energiebereiche
+  (Mitten nahe den wahren fc), Extract/Mix (Ton liegt im Kanal nahe DC),
+  Resample (decimate=4 -> Länge n/4, Puls erhalten), Labels des
+  kanalisierten Default-Pfads identisch zum Legacy-Pfad, Resampling in
+  classify (channelDecimate=2) ohne Labeländerung, breiter Chirp
+  (Hub 0.40) bleibt ein einziger Puls.
 - Härtungsfälle: Nullzeiger, leere und Miniatureingaben, reines Rauschen,
   Null- und DC-Puffer, vollständig NaN-/Inf-beladene Puffer sowie
   NaN-/Inf-/Null-Dropouts mitten in einem Puls: definierte Ergebnisse,
