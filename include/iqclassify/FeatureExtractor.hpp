@@ -40,6 +40,10 @@ struct Features {
     double paprWDb = 0.0;
     double chirpR2 = 0.0;
     double chirpSweep = 0.0;
+    // gefalteter Chirp (V-Form von f_inst, z. B. P3-Code nach Faltung):
+    // R^2 der beiden linearen Haelften (min) und Gesamthub relativ zur BW.
+    double chirpFoldR2 = 0.0;
+    double chirpFoldSweep = 0.0;
     double dwell = 0.0;
     double dwellThr = 0.0;
     int nfreqModes = 0;

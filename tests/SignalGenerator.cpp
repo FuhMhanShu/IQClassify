@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 
 #include "iqclassify/Dsp.hpp"
 
@@ -108,6 +109,108 @@ std::vector<cd> genFsk2(std::mt19937& rng, std::size_t nsym, int sps,
         }
     }
     return out;
+}
+
+std::vector<cd> genFrank(std::mt19937& rng, int m, int sps, double alpha) {
+    std::uniform_real_distribution<double> u01(0.0, 1.0);
+    const std::size_t nsym = static_cast<std::size_t>(m) * m;
+    const std::size_t guard = static_cast<std::size_t>(8 * sps);
+    std::vector<cd> up(nsym * static_cast<std::size_t>(sps) + guard,
+                       cd(0.0, 0.0));
+    const double ph0 = u01(rng) * 2.0 * kPi;
+    for (int i = 0; i < m; ++i) {
+        for (int j = 0; j < m; ++j) {
+            const double a = ph0 + 2.0 * kPi * i * j / m;
+            up[(static_cast<std::size_t>(i) * m + j) *
+                   static_cast<std::size_t>(sps) +
+               static_cast<std::size_t>(4 * sps)] =
+                cd(std::cos(a), std::sin(a));
+        }
+    }
+    const std::vector<double> taps =
+        iqclassify::detail::rrcTaps(sps, alpha, 8);
+    std::vector<cd> y = fir(up, taps);
+    y.assign(y.begin() + static_cast<std::ptrdiff_t>(4 * sps),
+             y.begin() + static_cast<std::ptrdiff_t>(4 * sps) +
+                 static_cast<std::ptrdiff_t>(nsym * sps));
+    const double p = meanPower(y);
+    const double sc = 1.0 / std::sqrt(p > 1e-30 ? p : 1e-30);
+    for (cd& v : y) v *= sc;
+    return y;
+}
+
+const std::vector<int>& barkerSeq(int len) {
+    static const std::map<int, std::vector<int>> kBarker = {
+        {2, {1, 1}},
+        {3, {1, 1, -1}},
+        {4, {1, 1, -1, 1}},
+        {5, {1, 1, 1, -1, 1}},
+        {7, {1, 1, 1, -1, -1, 1, -1}},
+        {11, {1, 1, 1, -1, -1, -1, 1, -1, -1, 1, -1}},
+        {13, {1, 1, 1, 1, 1, -1, -1, 1, 1, -1, 1, -1, 1}},
+    };
+    static const std::vector<int> kEmpty;
+    const auto it = kBarker.find(len);
+    return it != kBarker.end() ? it->second : kEmpty;
+}
+
+// Generischer polyphase/2-PSK-Code-Generator: chips als Phasenliste.
+static std::vector<cd> genCodeChips(std::mt19937& rng,
+                                    const std::vector<double>& chipPhases,
+                                    int sps, double alpha) {
+    std::uniform_real_distribution<double> u01(0.0, 1.0);
+    const std::size_t nsym = chipPhases.size();
+    const std::size_t guard = static_cast<std::size_t>(8 * sps);
+    std::vector<cd> up(nsym * static_cast<std::size_t>(sps) + guard,
+                       cd(0.0, 0.0));
+    const double ph0 = u01(rng) * 2.0 * kPi;
+    for (std::size_t i = 0; i < nsym; ++i) {
+        const double a = ph0 + chipPhases[i];
+        up[i * static_cast<std::size_t>(sps) +
+           static_cast<std::size_t>(4 * sps)] = cd(std::cos(a), std::sin(a));
+    }
+    const std::vector<double> taps =
+        iqclassify::detail::rrcTaps(sps, alpha, 8);
+    std::vector<cd> y = fir(up, taps);
+    y.assign(y.begin() + static_cast<std::ptrdiff_t>(4 * sps),
+             y.begin() + static_cast<std::ptrdiff_t>(4 * sps) +
+                 static_cast<std::ptrdiff_t>(nsym * sps));
+    const double p = meanPower(y);
+    const double sc = 1.0 / std::sqrt(p > 1e-30 ? p : 1e-30);
+    for (cd& v : y) v *= sc;
+    return y;
+}
+
+std::vector<cd> genPcode(std::mt19937& rng, int p, int m, int sps,
+                         double alpha) {
+    std::vector<double> phases;
+    if (p == 1 || p == 2) {
+        phases.reserve(static_cast<std::size_t>(m) * m);
+        for (int i = 0; i < m; ++i)
+            for (int j = 0; j < m; ++j) {
+                const double a =
+                    p == 1 ? -(kPi / m) * (m - 2 * i) * (m - 2 * j)
+                           : -(kPi / m) * (m - 2 * i) * (m - 2 * j - 1);
+                phases.push_back(a);
+            }
+    } else if (p == 3 || p == 4) {
+        phases.reserve(static_cast<std::size_t>(m));
+        for (int i = 0; i < m; ++i) {
+            const double a = (kPi / m) * i * i - (p == 4 ? kPi * i : 0.0);
+            phases.push_back(a);
+        }
+    }
+    return genCodeChips(rng, phases, sps, alpha);
+}
+
+std::vector<cd> genBarker(std::mt19937& rng, int len, int sps, int repeats,
+                          double alpha) {
+    const std::vector<int>& b = barkerSeq(len);
+    std::vector<double> phases;
+    phases.reserve(b.size() * static_cast<std::size_t>(repeats));
+    for (int r = 0; r < repeats; ++r)
+        for (int v : b) phases.push_back(v > 0 ? 0.0 : kPi);
+    return genCodeChips(rng, phases, sps, alpha);
 }
 
 std::vector<cd> genChirp(std::size_t nsamp, double bw, bool up) {

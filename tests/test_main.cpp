@@ -39,6 +39,11 @@
 //      Lokalisierung via automatischem Slice-Upsampling (cfg.upsample) +
 //      shortPulseProfile; Rauschboden bei wenigen Bloecken per Perzentil;
 //      CW/FSK2/QPSK ebenso; Default-Profil erwartet laengere Pulse (0 Pulse)
+//  21. Frank-Codes (polyphase Radar-Codes, Ordnung M, Laenge M^2): Detektion
+//      als FrankCode via Treppenstruktur der Momentanfrequenz (Stufen gleich-
+//      abstaendig, lange Runs, R^2 der Stufen-Mitten), M=8/16 bei 20/15 dB,
+//      Mehrpuls-Szene Frank+CW, Analyse-API analyzeFrank (Ordnung, Chip-Rate,
+//      Code-Phasen); Chirp/FSK2/QPSK duerfen nicht als FrankCode durchgehen
 //
 // Ein Szenario besteht genau dann den Test, wenn die sortierte Labelmenge
 // der erkannten Pulse der erwarteten entspricht. Fuer
@@ -1695,6 +1700,385 @@ int main() {
             } else {
                 std::printf("[FAIL] %-24s nRes=%zu\n", "short-noupsample",
                             res.size());
+            }
+        }
+    }
+    // 21. Frank-Codes (polyphase Radar-Code): Treppe der Momentanfrequenz.
+    {
+        // M=8, 20 dB und 15 dB, je 3 Seeds: genau 1 Puls, FrankCode, fc-Lage.
+        for (double snr : {20.0, 15.0}) {
+            ++g_total;
+            int okc = 0;
+            double fcErr = 0.0;
+            for (int seed = 1; seed <= 3; ++seed) {
+                std::mt19937 rng(seed * 10 + 8);
+                iqtest::Recorder rec;
+                rec.silence(2000);
+                rec.add(iqtest::genFrank(rng, 8, 8), 0.15, snr);
+                rec.silence(2000);
+                iqclassify::ClassifierConfig cfg;
+                iqclassify::ModulationClassifier clf(cfg);
+                const auto res =
+                    clf.classify(rec.buffer().data(), rec.buffer().size());
+                if (res.size() == 1 &&
+                    res[0].modulation == iqclassify::ModulationType::FrankCode) {
+                    ++okc;
+                    fcErr = std::max(fcErr, cycDist(res[0].centerFreqRefined, 0.15));
+                }
+            }
+            if (okc == 3 && fcErr < 0.03) {
+                ++g_ok;
+                std::printf("[OK ] %-24s M=8 snr=%.0f: 3/3 FrankCode fcErr=%.4f\n",
+                            "frank-M8", snr, fcErr);
+            } else {
+                std::printf("[FAIL] %-24s M=8 snr=%.0f: %d/3 fcErr=%.4f\n",
+                            "frank-M8", snr, okc, fcErr);
+            }
+        }
+        // M=16, 20 dB: mindestens ein FrankCode-Puls (das Kamm-Spektrum kann
+        // bei hoeherer Ordnung in Subbaender zerfallen).
+        {
+            ++g_total;
+            std::mt19937 rng(77);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genFrank(rng, 16, 8), 0.15, 20.0);
+            rec.silence(2000);
+            iqclassify::ClassifierConfig cfg;
+            iqclassify::ModulationClassifier clf(cfg);
+            const auto res =
+                clf.classify(rec.buffer().data(), rec.buffer().size());
+            bool any = false;
+            for (const auto& r : res)
+                if (r.modulation == iqclassify::ModulationType::FrankCode)
+                    any = true;
+            if (any && !res.empty()) {
+                ++g_ok;
+                std::printf("[OK ] %-24s M=16 snr=20: %zu Pulse, mind. 1 FrankCode\n",
+                            "frank-M16", res.size());
+            } else {
+                std::printf("[FAIL] %-24s M=16 snr=20: n=%zu\n", "frank-M16",
+                            res.size());
+                for (const auto& r : res) printPulse(r);
+            }
+        }
+        // Mehrpuls: Frank + CW zeitlich getrennt in getrennten Baendern.
+        {
+            std::mt19937 rng(42);
+            iqtest::Recorder rec;
+            rec.silence(3000);
+            rec.add(iqtest::genFrank(rng, 8, 8), 0.15, 20.0);
+            rec.silence(800);
+            rec.add(iqtest::genCw(rng, 4000), -0.35, 20.0);
+            rec.silence(3000);
+            scenario("frank-multi-cw", rec.buffer(), "FrankCode/Unmodulated");
+        }
+        // Analyse-API: Ordnung, Code-Laenge, Chip-Rate, R^2, Code-Phasen.
+        {
+            ++g_total;
+            std::mt19937 rng(11);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genFrank(rng, 8, 8), 0.15, 20.0);
+            rec.silence(2000);
+            iqclassify::ClassifierConfig cfg;
+            iqclassify::ModulationClassifier clf(cfg);
+            const auto res =
+                clf.classify(rec.buffer().data(), rec.buffer().size());
+            bool ok = res.size() == 1 &&
+                      res[0].modulation == iqclassify::ModulationType::FrankCode;
+            iqclassify::FrankParams fp;
+            if (ok) {
+                fp = clf.analyzeFrank(rec.buffer().data(), rec.buffer().size(),
+                                      res[0]);
+                ok = fp.valid && fp.order >= 3 && fp.order <= 16 &&
+                     fp.codeLength ==
+                         static_cast<std::size_t>(fp.order) * fp.order &&
+                     fp.r2 > 0.9 && fp.chipRateNorm > 0.01 &&
+                     fp.chipRateNorm < 0.5 && fp.codePhases.size() == fp.codeLength;
+            }
+            if (ok) {
+                ++g_ok;
+                std::printf("[OK ] %-24s M=8: order=%d N=%zu chipRate=%.4f r2=%.3f\n",
+                            "frank-analyze", fp.order, fp.codeLength,
+                            fp.chipRateNorm, fp.r2);
+            } else {
+                std::printf("[FAIL] %-24s nRes=%zu valid=%d order=%d r2=%.3f\n",
+                            "frank-analyze", res.size(), (int)fp.valid, fp.order,
+                            fp.r2);
+            }
+        }
+        // Negativ: Chirp und FSK2 duerfen nicht als FrankCode durchgehen
+        // (wird zusaetzlich durch die gesamte uebrige Suite abgesichert).
+        {
+            std::mt19937 rng(5);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genChirp(8192, 0.25, true), 0.10, 20.0);
+            rec.silence(2000);
+            scenario("frank-neg-chirp", rec.buffer(), "Chirp");
+        }
+        {
+            std::mt19937 rng(6);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genFsk2(rng, 1024, 8), 0.10, 20.0);
+            rec.silence(2000);
+            scenario("frank-neg-fsk2", rec.buffer(), "FSK2");
+        }
+    }
+    // 22. P-Codes (P1..P4, polyphase Radar-Codes anknuepfend an Frank):
+    // P1/P2 -> PCode mit Subtyp/Ordnung, P3/P4 -> Chirp (P3 gefaltet).
+    {
+        // P1/P2, M=8, 20 dB: 3 Seeds je Subtyp -> genau 1 Puls PCode,
+        // fc-Lage, analyzePcode: Subtyp (1=P1, 2=P2), Ordnung 8, N=64.
+        for (int p = 1; p <= 2; ++p) {
+            ++g_total;
+            int okc = 0, subOk = 0;
+            double fcErr = 0.0;
+            for (int seed = 1; seed <= 3; ++seed) {
+                std::mt19937 rng(500 + (p - 1) * 10 + seed);
+                iqtest::Recorder rec;
+                rec.silence(2000);
+                rec.add(iqtest::genPcode(rng, p, 8, 8), 0.15, 20.0);
+                rec.silence(2000);
+                iqclassify::ClassifierConfig cfg;
+                iqclassify::ModulationClassifier clf(cfg);
+                const auto res =
+                    clf.classify(rec.buffer().data(), rec.buffer().size());
+                if (res.size() == 1 &&
+                    res[0].modulation == iqclassify::ModulationType::PCode) {
+                    ++okc;
+                    fcErr = std::max(fcErr,
+                                     cycDist(res[0].centerFreqRefined, 0.15));
+                    const auto pp = clf.analyzePcode(
+                        rec.buffer().data(), rec.buffer().size(), res[0]);
+                    if (pp.valid && pp.subtype == p && pp.order == 8 &&
+                        pp.codeLength == 64 && pp.chipRateNorm > 0.05 &&
+                        pp.chipRateNorm < 0.5 &&
+                        pp.codePhases.size() == pp.codeLength)
+                        ++subOk;
+                }
+            }
+            if (okc == 3 && subOk == 3 && fcErr < 0.03) {
+                ++g_ok;
+                std::printf("[OK ] %-24s P%d M=8 snr=20: 3/3 PCode+sub "
+                            "M=8 fcErr=%.4f\n",
+                            p == 1 ? "pcode-P1-M8" : "pcode-P2-M8", p, fcErr);
+            } else {
+                std::printf("[FAIL] %-24s P%d M=8 snr=20: %d/3 sub=%d "
+                            "fcErr=%.4f\n",
+                            p == 1 ? "pcode-P1-M8" : "pcode-P2-M8", p, okc,
+                            subOk, fcErr);
+            }
+        }
+        // P1/P2, M=8, 15 dB: nur Label PCode (Subtyp bei 15 dB nicht
+        // zuverlaessig bestimmbar).
+        for (int p = 1; p <= 2; ++p) {
+            ++g_total;
+            int okc = 0;
+            for (int seed = 1; seed <= 3; ++seed) {
+                std::mt19937 rng(500 + (p - 1) * 10 + seed);
+                iqtest::Recorder rec;
+                rec.silence(2000);
+                rec.add(iqtest::genPcode(rng, p, 8, 8), 0.15, 15.0);
+                rec.silence(2000);
+                iqclassify::ClassifierConfig cfg;
+                iqclassify::ModulationClassifier clf(cfg);
+                const auto res =
+                    clf.classify(rec.buffer().data(), rec.buffer().size());
+                if (res.size() == 1 &&
+                    res[0].modulation == iqclassify::ModulationType::PCode)
+                    ++okc;
+            }
+            if (okc == 3) {
+                ++g_ok;
+                std::printf("[OK ] %-24s P%d M=8 snr=15: 3/3 PCode\n",
+                            p == 1 ? "pcode-P1-M8-15" : "pcode-P2-M8-15", p);
+            } else {
+                std::printf("[FAIL] %-24s P%d M=8 snr=15: %d/3\n",
+                            p == 1 ? "pcode-P1-M8-15" : "pcode-P2-M8-15", p,
+                            okc);
+            }
+        }
+        // P1/P2 mit M=16: Ordnung und Subtyp aus analyzePcode.
+        for (int p = 1; p <= 2; ++p) {
+            ++g_total;
+            std::mt19937 rng(80 + p - 1);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genPcode(rng, p, 16, 8), 0.15, 20.0);
+            rec.silence(2000);
+            iqclassify::ClassifierConfig cfg;
+            iqclassify::ModulationClassifier clf(cfg);
+            const auto res =
+                clf.classify(rec.buffer().data(), rec.buffer().size());
+            bool ok = res.size() == 1 &&
+                      res[0].modulation == iqclassify::ModulationType::PCode;
+            iqclassify::PcodeParams pp;
+            if (ok) {
+                pp = clf.analyzePcode(rec.buffer().data(), rec.buffer().size(),
+                                      res[0]);
+                ok = pp.valid && pp.subtype == p && pp.order == 16 &&
+                     pp.codeLength == 256 &&
+                     pp.codePhases.size() == pp.codeLength;
+            }
+            if (ok) {
+                ++g_ok;
+                std::printf("[OK ] %-24s P%d M=16: sub=%d order=%d N=%zu\n",
+                            p == 1 ? "pcode-P1-M16" : "pcode-P2-M16", p,
+                            pp.subtype, pp.order, pp.codeLength);
+            } else {
+                std::printf("[FAIL] %-24s P%d M=16: nRes=%zu valid=%d "
+                            "sub=%d order=%d\n",
+                            p == 1 ? "pcode-P1-M16" : "pcode-P2-M16", p,
+                            res.size(), (int)pp.valid, pp.subtype, pp.order);
+            }
+        }
+        // P3/P4 sind lineare Chirps der Laenge M (P3 erscheint durch die
+        // Faltung am Chip-Rand als Saegezahn -> gefalteter Chirp).
+        {
+            std::mt19937 rng(70);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genPcode(rng, 3, 64, 8), 0.15, 20.0);
+            rec.silence(2000);
+            scenario("pcode-P3-chirp", rec.buffer(), "Chirp");
+        }
+        {
+            std::mt19937 rng(71);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genPcode(rng, 4, 64, 8), 0.15, 20.0);
+            rec.silence(2000);
+            scenario("pcode-P4-chirp", rec.buffer(), "Chirp");
+        }
+        {
+            std::mt19937 rng(72);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genPcode(rng, 3, 64, 8), 0.15, 15.0);
+            rec.silence(2000);
+            scenario("pcode-P3-chirp-15", rec.buffer(), "Chirp");
+        }
+        // Negativ: FSK2 darf nicht als PCode durchgehen.
+        {
+            std::mt19937 rng(7);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genFsk2(rng, 1024, 8), 0.10, 20.0);
+            rec.silence(2000);
+            scenario("pcode-neg-fsk2", rec.buffer(), "FSK2");
+        }
+    }
+    // 23. Barker-Codes: BPSK-Pulse mit Barker-Folge (7/11/13, wiederholt)
+    // werden als BarkerCode fein-klassifiziert; analyzeBarker liefert
+    // Code, Wiederholungen und Chip-Rate.
+    {
+        // Barker13 x8, 3 Seeds: genau 1 Puls BarkerCode, Code == Barker13.
+        {
+            ++g_total;
+            int okc = 0;
+            for (int seed : {100, 101, 104}) {
+                std::mt19937 rng(seed);
+                iqtest::Recorder rec;
+                rec.silence(2000);
+                rec.add(iqtest::genBarker(rng, 13, 8, 8), 0.15, 20.0);
+                rec.silence(2000);
+                iqclassify::ClassifierConfig cfg;
+                iqclassify::ModulationClassifier clf(cfg);
+                const auto res =
+                    clf.classify(rec.buffer().data(), rec.buffer().size());
+                if (res.size() == 1 &&
+                    res[0].modulation ==
+                        iqclassify::ModulationType::BarkerCode) {
+                    const auto bp = clf.analyzeBarker(
+                        rec.buffer().data(), rec.buffer().size(), res[0]);
+                    const std::vector<int>& b13 = iqtest::barkerSeq(13);
+                    const bool codeOk = bp.valid && bp.length == 13 &&
+                                        bp.code == b13 && bp.repeats >= 4 &&
+                                        bp.sps > 6.0 && bp.sps < 10.0;
+                    if (codeOk) ++okc;
+                }
+            }
+            if (okc == 3) {
+                ++g_ok;
+                std::printf("[OK ] %-24s 3/3 BarkerCode len=13 code ok\n",
+                            "barker-13");
+            } else {
+                std::printf("[FAIL] %-24s %d/3 BarkerCode len=13\n",
+                            "barker-13", okc);
+            }
+        }
+        // Barker11 x5: BarkerCode mit Code == Barker11.
+        {
+            ++g_total;
+            std::mt19937 rng(415);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genBarker(rng, 11, 8, 5), 0.15, 20.0);
+            rec.silence(2000);
+            iqclassify::ClassifierConfig cfg;
+            iqclassify::ModulationClassifier clf(cfg);
+            const auto res =
+                clf.classify(rec.buffer().data(), rec.buffer().size());
+            bool ok = res.size() == 1 &&
+                      res[0].modulation ==
+                          iqclassify::ModulationType::BarkerCode;
+            if (ok) {
+                const auto bp = clf.analyzeBarker(rec.buffer().data(),
+                                                  rec.buffer().size(), res[0]);
+                ok = bp.valid && bp.length == 11 &&
+                     bp.code == iqtest::barkerSeq(11);
+            }
+            if (ok) {
+                ++g_ok;
+                std::printf("[OK ] %-24s BarkerCode len=11 code ok\n",
+                            "barker-11");
+            } else {
+                std::printf("[FAIL] %-24s nRes=%zu\n", "barker-11", res.size());
+                for (const auto& r : res) printPulse(r);
+            }
+        }
+        // Barker7 x5: Label BarkerCode.
+        {
+            std::mt19937 rng(475);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genBarker(rng, 7, 8, 5), 0.30, 20.0);
+            rec.silence(2000);
+            scenario("barker-7", rec.buffer(), "BarkerCode");
+        }
+        // Negativ: zufaelliger BPSK-Puls (104 Symbole) darf nie BarkerCode
+        // werden; analyzeBarker auf einem BPSK-Puls ist invalid.
+        {
+            ++g_total;
+            int okc = 0;
+            for (int seed = 60; seed <= 63; ++seed) {
+                std::mt19937 rng(seed);
+                iqtest::Recorder rec;
+                rec.silence(2000);
+                rec.add(iqtest::genPsk(rng, 2, 104, 8), 0.15, 20.0);
+                rec.silence(2000);
+                iqclassify::ClassifierConfig cfg;
+                iqclassify::ModulationClassifier clf(cfg);
+                const auto res =
+                    clf.classify(rec.buffer().data(), rec.buffer().size());
+                bool ok = res.size() == 1 &&
+                          res[0].modulation == iqclassify::ModulationType::BPSK;
+                if (ok) {
+                    const auto bp = clf.analyzeBarker(
+                        rec.buffer().data(), rec.buffer().size(), res[0]);
+                    ok = !bp.valid;
+                }
+                if (ok) ++okc;
+            }
+            if (okc == 4) {
+                ++g_ok;
+                std::printf("[OK ] %-24s 4/4 BPSK, kein BarkerCode\n",
+                            "barker-neg-bpsk");
+            } else {
+                std::printf("[FAIL] %-24s %d/4\n", "barker-neg-bpsk", okc);
             }
         }
     }
