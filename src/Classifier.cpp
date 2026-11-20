@@ -34,6 +34,8 @@ const char* toString(ModulationType t) {
         case ModulationType::QAM64: return "QAM64";
         case ModulationType::QAM256: return "QAM256";
         case ModulationType::FrankCode: return "FrankCode";
+        case ModulationType::PCode: return "PCode";
+        case ModulationType::BarkerCode: return "BarkerCode";
     }
     return "Unknown";
 }
@@ -524,6 +526,19 @@ double foldConc(const std::vector<double>& ph, int m) {
     return std::abs(acc) / static_cast<double>(ph.size());
 }
 
+// 2-PSK-Faltkonzentration auf den energie-tragenden Samples (env-gefiltert):
+// robust gegen Rausch-Guards am Crop-Rand (BPSK/Barker vs. OFDM/CP).
+double fold2Gated(const Features& f, const ClassifierConfig& cfg) {
+    double me = 0.0;
+    for (double e : f.env) me += e;
+    me /= static_cast<double>(f.env.size());
+    std::vector<double> ph;
+    ph.reserve(f.ph.size());
+    for (std::size_t i = 0; i < f.ph.size(); ++i)
+        if (f.env[i] >= cfg.histEnvRel * me) ph.push_back(f.ph[i]);
+    return ph.size() >= 8 ? foldConc(ph, 2) : 0.0;
+}
+
 double kappa(const std::vector<cd>& s) {
     const double n = static_cast<double>(s.size());
     double m2 = 0.0;
@@ -660,8 +675,11 @@ std::vector<cd> mfSymbols(const std::vector<cd>& y,
 // durchlaufen. Rueckgabe: Ordnung M (>= tFrankMinModes) oder 0; r2Out
 // erhaelt das R^2 der Stufen-Mitten gegen den Stufen-Index.
 int detectFrankOrder(const Features& f, const ClassifierConfig& cfg,
-                     double* r2Out = nullptr) {
+                     double* r2Out = nullptr, double* platLenOut = nullptr,
+                     double* dirOut = nullptr) {
     if (r2Out) *r2Out = 0.0;
+    if (platLenOut) *platLenOut = 0.0;
+    if (dirOut) *dirOut = 1.0;
     const std::size_t n = f.n;
     if (n < 96) return 0;
     const std::size_t n1 = n - 1;
@@ -775,6 +793,11 @@ int detectFrankOrder(const Features& f, const ClassifierConfig& cfg,
             }
         }
     }
+    // mediane Stufendauer (vor dem Verschmelzen fein geteilter Stufen):
+    // eine Stufe dauert ~ M Chips -> Chip-Laenge = platLen/M
+    if (platLenOut)
+        *platLenOut = static_cast<double>(tot) /
+                      static_cast<double>(groups.size());
     const int P = static_cast<int>(groups.size());
     if (P < cfg.tFrankMinModes || P > cfg.tFrankMaxModes) return 0;
     // Coverage: Anteil der gated Samples in Stufen
@@ -817,6 +840,12 @@ int detectFrankOrder(const Features& f, const ClassifierConfig& cfg,
         std::vector<std::size_t> maxRun(static_cast<std::size_t>(P), 0);
         int prev = -1;
         std::size_t run = 0;
+        // Zeitfolge der Stufen: Run-Mittel der gefilterten finst je
+        // zusammenhaengendem Run (liefert die Richtung der Treppe).
+        std::vector<double> runMean;
+        std::vector<double> runPos;
+        std::size_t runStart = 0;
+        double runSum = 0.0;
         for (std::size_t i = 0; i < n1; ++i) {
             if (f.env[i] < gate) continue;
             int best = 0;
@@ -830,21 +859,435 @@ int detectFrankOrder(const Features& f, const ClassifierConfig& cfg,
             if (prev >= 0 && best != prev) {
                 maxRun[static_cast<std::size_t>(prev)] =
                     std::max(maxRun[static_cast<std::size_t>(prev)], run);
+                runMean.push_back(runSum / static_cast<double>(run));
+                runPos.push_back(static_cast<double>(runStart));
                 run = 0;
+                runStart = i;
+                runSum = 0.0;
             }
             ++run;
+            runSum += fm[i];
             prev = best;
         }
-        if (prev >= 0)
+        if (prev >= 0) {
             maxRun[static_cast<std::size_t>(prev)] =
                 std::max(maxRun[static_cast<std::size_t>(prev)], run);
+            runMean.push_back(runSum / static_cast<double>(run));
+            runPos.push_back(static_cast<double>(runStart));
+        }
         const std::size_t lMin = tot / (3 * static_cast<std::size_t>(P)) > 8
                                      ? tot / (3 * static_cast<std::size_t>(P))
                                      : 8;
         for (int k = 0; k < P; ++k)
             if (maxRun[static_cast<std::size_t>(k)] < lMin) return 0;
+        // Richtung der Treppe in der Zeit: die Run-Mittel werden mit der
+        // Chip-Periode p = 1/sps entwrappt (sonst kippt das Vorzeichen am
+        // Faltungsrand +/-0.5/sps), dann linear gegen die Run-Position
+        // gefittet. sps kommt aus der Run-Struktur: eine Stufe (Zeile des
+        // Codes) ist ein langer Run der Laenge M*sps, also sps ~ rowLen^2 /
+        // span. Frank steigt (> 0), P1/P2 fallen (< 0).
+        if (dirOut && runMean.size() >= 3) {
+            std::vector<double> lm, lp;
+            for (std::size_t k = 0; k < runMean.size(); ++k) {
+                const double len =
+                    (k + 1 < runMean.size() ? runPos[k + 1]
+                                            : static_cast<double>(n1)) -
+                    runPos[k];
+                if (len >= static_cast<double>(lMin)) {
+                    lm.push_back(runMean[k]);
+                    lp.push_back(runPos[k]);
+                }
+            }
+            if (lm.size() >= 3) {
+                std::vector<double> ls;
+                for (std::size_t k = 0; k + 1 < lm.size(); ++k)
+                    ls.push_back(lp[k + 1] - lp[k]);
+                std::sort(ls.begin(), ls.end());
+                const double rowLen = ls[ls.size() / 2];
+                const double span = lp.back() - lp.front() + rowLen;
+                double p = span / (rowLen * rowLen);
+                std::vector<double> steps;
+                for (std::size_t k = 0; k + 1 < lm.size(); ++k) {
+                    const double d =
+                        std::fmod(lm[k + 1] - lm[k] + 1.5, 1.0) - 0.5;
+                    steps.push_back(std::abs(d));
+                }
+                std::sort(steps.begin(), steps.end());
+                const double medStep = steps[steps.size() / 2];
+                if (p < 2.0 * medStep || p > 0.45) p = 1.0;
+                std::vector<double> u(lm.size());
+                u[0] = lm[0];
+                for (std::size_t k = 1; k < lm.size(); ++k) {
+                    const double d = lm[k] - u[k - 1];
+                    double r = std::fmod(d + p / 2.0, p);
+                    if (r < 0.0) r += p;
+                    r -= p / 2.0;
+                    u[k] = u[k - 1] + r;
+                }
+                double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+                const double R = static_cast<double>(lm.size());
+                for (std::size_t k = 0; k < lm.size(); ++k) {
+                    sx += lp[k];
+                    sy += u[k];
+                    sxx += lp[k] * lp[k];
+                    sxy += lp[k] * u[k];
+                }
+                const double den = R * sxx - sx * sx;
+                if (std::abs(den) > 1e-30)
+                    *dirOut = (R * sxy - sx * sy) / den;
+            }
+        }
     }
     return P;
+}
+
+// --------------------------------------------------------------------------
+// Phasen-Gesetze der M x M polyphase Codes (Chip k = i*M + j)
+// --------------------------------------------------------------------------
+double polyLawPhase(int law, int M, int i, int j) {
+    switch (law) {
+        case 0:
+            return 2.0 * kPi * i * j / M;               // Frank
+        case 1:
+            return -(kPi / M) * (M - 2 * i) * (M - 2 * j);  // P1
+        default:
+            return -(kPi / M) * (M - 2 * i) * (M - 2 * j - 1);  // P2
+    }
+}
+
+// RMS-Phasenfehler der an den Chip-Mitten rekonstruierten Phasen gegen ein
+// Phasen-Gesetz (Offset-frei ueber den zirkularen Mittelwert).
+double lawErr(const std::vector<cd>& y, const Features& f, double chipLen,
+              int M, int law) {
+    const std::size_t N = static_cast<std::size_t>(M) * M;
+    double me = 0.0;
+    for (double e : f.env) me += e;
+    me /= static_cast<double>(f.env.size());
+    std::vector<cd> z;
+    z.reserve(N);
+    for (std::size_t k = 0; k < N; ++k) {
+        std::size_t ci =
+            static_cast<std::size_t>((static_cast<double>(k) + 0.5) * chipLen);
+        if (ci >= y.size()) ci = y.size() - 1;
+        if (ci >= f.env.size() || f.env[ci] < 0.4 * me) continue;  // Rand-Chips
+        double ph = std::atan2(y[ci].imag(), y[ci].real()) -
+                    2.0 * kPi * f.residF * static_cast<double>(ci);
+        ph -= polyLawPhase(law, M, static_cast<int>(k / M),
+                           static_cast<int>(k % M));
+        z.push_back(cd(std::cos(ph), std::sin(ph)));
+    }
+    if (z.size() < 9) return 1e300;
+    cd acc(0.0, 0.0);
+    for (const cd& v : z) acc += v;
+    const double meanPh = std::atan2(acc.imag(), acc.real());
+    double err = 0.0;
+    for (const cd& v : z) {
+        double d = std::atan2(v.imag(), v.real()) - meanPh;
+        d = std::fmod(d + 3.0 * kPi, 2.0 * kPi) - kPi;
+        err += d * d;
+    }
+    return std::sqrt(err / static_cast<double>(z.size()));
+}
+
+// Bestes Phasen-Gesetz fuer die Code-Phasen des Slices: probiert Frank/P1/P2
+// mit Ordnungen um Mapprox und gibt 0/1/2 zurueck (0 = Frank).
+int polyLawMatch(const std::vector<cd>& y, const Features& f, int Mapprox,
+                 double platLen, int* Mbest = nullptr,
+                 double* errBest = nullptr) {
+    (void)platLen;  // Chip-Laenge wird aus y.size()/M^2 geschaetzt
+    int bestLaw = 0;
+    int bestM = Mapprox > 3 ? Mapprox : 3;
+    double bestErr = 1e300;
+    double bestFrankErr = 1e300;
+    int bestFrankM = bestM;
+    const int lo = Mapprox > 4 ? Mapprox : 4;  // Merging unterschaetzt M nie
+    const int hi = 2 * Mapprox + 2 < 48 ? 2 * Mapprox + 2 : 48;
+    for (int M = lo; M <= hi; ++M) {
+        const std::size_t N = static_cast<std::size_t>(M) * M;
+        if (N > y.size() || N < 9) continue;
+        // Chip-Laenge: der Crop enthaelt ca. M^2 Chips; um n/N fein suchen
+        // (1%-Schritte, damit die Drift ueber M^2 Chips klein bleibt).
+        const double chip0 = static_cast<double>(y.size()) / N;
+        for (int law = 0; law < 3; ++law) {
+            double bestE = 1e300;
+            for (int o = -8; o <= 8; ++o) {
+                double chipLen = chip0 * (1.0 + 0.01 * o);
+                if (chipLen < 1.0) chipLen = 1.0;
+                bestE = std::min(bestE, lawErr(y, f, chipLen, M, law));
+            }
+            const double err = bestE;
+            if (err < bestErr) {
+                bestErr = err;
+                bestLaw = law;
+                bestM = M;
+            }
+            if (law == 0 && err < bestFrankErr) {
+                bestFrankErr = err;
+                bestFrankM = M;
+            }
+        }
+    }
+    if (Mbest) *Mbest = bestM;
+    if (errBest) *errBest = bestErr;
+    // Nur bei klarem Vorsprung gegen das beste Frank-Gesetz (sonst FrankCode)
+    if (bestLaw != 0 && bestFrankErr < bestErr + 0.25) {
+        if (Mbest) *Mbest = bestFrankM;
+        if (errBest) *errBest = bestFrankErr;
+        return 0;
+    }
+    return bestLaw;
+}
+
+// --------------------------------------------------------------------------
+// Matched-Filter-Vergleich der Phasen-Gesetze (robust gegen Impulsformung):
+// gleitende Korrelation des Slices mit dem ungefilterten Chip-Template.
+// --------------------------------------------------------------------------
+double mfLawScore(const std::vector<cd>& y, int M, int law, double chipLen,
+                  double offDiv = 4.0) {
+    const std::size_t N = static_cast<std::size_t>(M) * M;
+    if (N < 9 || chipLen < 1.0) return 0.0;
+    const std::size_t T =
+        static_cast<std::size_t>(static_cast<double>(N) * chipLen + chipLen);
+    // Template darf laenger als der Slice sein (Rand-Guards): Korrelation
+    // laeuft ueber den verfuegbaren Ueberlapp, solange der groesste Teil des
+    // Templates abgedeckt ist.
+    if (static_cast<double>(T) > 2.0 * static_cast<double>(y.size())) return 0.0;
+    std::vector<cd> t(T, cd(0.0, 0.0));
+    for (std::size_t k = 0; k < N; ++k) {
+        const double ph =
+            polyLawPhase(law, M, static_cast<int>(k / M),
+                         static_cast<int>(k % M));
+        const std::size_t c = static_cast<std::size_t>(k * chipLen);
+        if (c < T) t[c] = cd(std::cos(ph), std::sin(ph));
+    }
+    double ey = 0.0;
+    for (const cd& v : y) ey += std::norm(v);
+    if (ey < 1e-30) return 0.0;
+    double step = chipLen / offDiv;
+    if (step < 1.0) step = 1.0;
+    double best = 0.0;
+    for (double off = 0.0; off < static_cast<double>(y.size()); off += step) {
+        const std::size_t o0 = static_cast<std::size_t>(off);
+        const std::size_t W = std::min(T, y.size() - o0);
+        if (static_cast<double>(W) < 0.6 * static_cast<double>(T)) break;
+        cd acc(0.0, 0.0);
+        for (std::size_t i = 0; i < W; ++i)
+            acc += y[o0 + i] * std::conj(t[i]);
+        const double s =
+            std::abs(acc) /
+            std::sqrt(ey * static_cast<double>(N)) *
+            std::sqrt(static_cast<double>(W) / static_cast<double>(y.size()));
+        if (s > best) best = s;
+    }
+    return best;
+}
+
+// Bestes Phasen-Gesetz per Matched Filter ueber Ordnungen um Mapprox.
+// Rueckgabe: 0 = Frank, 1 = P1, 2 = P2. P gewinnt nur, wenn sein Score bei
+// derselben Ordnung M klar ueber dem Frank-Score liegt (Verhaeltnis 1.15).
+// scoreBest/frankBest liefern die Scores der Best-Ordnung.
+int polyLawMf(const std::vector<cd>& y, int Mapprox, double platLen,
+              int* Mbest = nullptr, double* scoreBest = nullptr,
+              double* frankBest = nullptr, bool fineGrid = true) {
+    (void)platLen;  // Chip-Laenge wird aus y.size()/M^2 geschaetzt
+    int bestLaw = 0;
+    int bestM = Mapprox > 3 ? Mapprox : 3;
+    double bestP = 0.0;
+    double maxF = 0.0;
+    const int lo = Mapprox > 4 ? Mapprox : 4;
+    const int hi = 2 * Mapprox + 2 < 20 ? 2 * Mapprox + 2 : 20;
+    for (int M = lo; M <= hi; ++M) {
+        const std::size_t N = static_cast<std::size_t>(M) * M;
+        if (N + 8 > y.size()) break;
+        const double chip0 = static_cast<double>(y.size()) / N;
+        double scF = 0.0;
+        double scP[2] = {0.0, 0.0};
+        for (int law = 0; law < 3; ++law) {
+            double sc = 0.0;
+            if (fineGrid) {
+                for (int o = -8; o <= 8; ++o) {
+                    double cl = chip0 * (1.0 + 0.01 * o);
+                    if (cl < 1.0) cl = 1.0;
+                    sc = std::max(sc, mfLawScore(y, M, law, cl, 4.0));
+                }
+            } else {
+                for (int o = -4; o <= 4; ++o) {
+                    double cl = chip0 * (1.0 + 0.02 * o);
+                    if (cl < 1.0) cl = 1.0;
+                    sc = std::max(sc, mfLawScore(y, M, law, cl, 2.0));
+                }
+            }
+            if (law == 0) scF = sc;
+            else scP[law - 1] = sc;
+        }
+        maxF = std::max(maxF, scF);
+        const double p = std::max(scP[0], scP[1]);
+        if (p > bestP) {
+            bestP = p;
+            bestM = M;
+            bestLaw = scP[0] >= scP[1] ? 1 : 2;
+        }
+    }
+    if (Mbest) *Mbest = bestM;
+    if (scoreBest) *scoreBest = bestP;
+    if (frankBest) *frankBest = maxF;
+    // P gewinnt nur bei klarem Vorsprung des besten P-Scores gegen den
+    // besten Frank-Score im ganzen Ordnungsbereich (sonst Frank).
+    if (bestLaw != 0 && bestP < 1.15 * maxF) return 0;
+    return bestLaw;
+}
+
+// --------------------------------------------------------------------------
+// Barker-Match direkt auf dem Slice: Symboltakt um die Schaetzung fein suchen
+// (die Barker-Periodizitaet stoert die Symbolratenschaetzung), Zeichen an den
+// Chip-Mitten (env-gefiltert, auf den Resttraeger derotiert via f.ph), gegen
+// alle Rotationen und beide Vorzeichen der Barker-Folgen testen.
+// Rueckgabe: Code-Laenge (7/11/13) oder 0; bestReps/bestScore/bestSps optional.
+// --------------------------------------------------------------------------
+int barkerMatchSlice(const std::vector<cd>& y, const Features& f,
+                     const ClassifierConfig& cfg, double spsEst,
+                     int* bestReps = nullptr, double* bestScore = nullptr,
+                     double* bestSps = nullptr) {
+    static const int b13[] = {1, 1, 1, 1, 1, -1, -1, 1, 1, -1, 1, -1, 1};
+    static const int b11[] = {1, 1, 1, -1, -1, -1, 1, -1, -1, 1, -1};
+    static const int b7[] = {1, 1, 1, -1, -1, 1, -1};
+    static const int* seqs[] = {b13, b11, b7};
+    static const int lens[] = {13, 11, 7};
+    if (spsEst < 2.0 || y.size() < 96) return 0;
+    double me = 0.0;
+    for (double e : f.env) me += e;
+    me /= static_cast<double>(f.env.size());
+    const double gate = cfg.histEnvRel * me;
+    int bestLen = 0;
+    int bestRep = 0;
+    double bestSc = 0.0;
+    double bestSp = spsEst;
+    const double lo = spsEst * 0.65;
+    const double hi = spsEst * 1.45;
+    for (int t = 0; t < 3; ++t) {
+        const int l = lens[t];
+        if (l < cfg.tBarkerMinLen) continue;
+        for (double sps = lo; sps <= hi; sps += 0.1) {
+            const int nsym =
+                static_cast<int>(static_cast<double>(y.size()) / sps);
+            if (nsym < 2 * l) continue;
+            for (double off = 0.0; off < sps; off += sps / 8.0) {
+                std::vector<int> sg(static_cast<std::size_t>(nsym), 0);
+                int valid = 0;
+                for (int k = 0; k < nsym; ++k) {
+                    const std::size_t ci = static_cast<std::size_t>(
+                        off + (static_cast<double>(k) + 0.5) * sps);
+                    if (ci >= y.size() || ci >= f.env.size()) continue;
+                    if (f.env[ci] < gate) continue;
+                    sg[static_cast<std::size_t>(k)] =
+                        std::cos(f.ph[ci]) >= 0.0 ? 1 : -1;
+                    ++valid;
+                }
+                if (valid < 2 * l) continue;
+                for (int rot = 0; rot < l; ++rot) {
+                    for (int sign = 0; sign < 2; ++sign) {
+                        int match = 0;
+                        for (int k = 0; k < nsym; ++k) {
+                            if (sg[static_cast<std::size_t>(k)] == 0) continue;
+                            const int expect = (sign ? -1 : 1) *
+                                               seqs[t][(k + rot) % l];
+                            if (sg[static_cast<std::size_t>(k)] == expect)
+                                ++match;
+                        }
+                        const double sc = static_cast<double>(match) /
+                                          static_cast<double>(valid);
+                        if (sc > bestSc) {
+                            bestSc = sc;
+                            bestLen = l;
+                            bestRep = valid / l;
+                            bestSp = sps;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (bestSc >= 0.95 && bestLen >= cfg.tBarkerMinLen) {
+        if (bestReps) *bestReps = bestRep;
+        if (bestScore) *bestScore = bestSc;
+        if (bestSps) *bestSps = bestSp;
+        return bestLen;
+    }
+    return 0;
+}
+
+// --------------------------------------------------------------------------
+// Billiger Vorab-Test fuer den P-Code-Fallback: lange Runs einzelner
+// f_inst-Level (Stufen-Signatur eines Polyphase-Codes). FSK2 und Chirp
+// haben keine langen Runs und sparen so den teuren Matched-Filter.
+// --------------------------------------------------------------------------
+bool hasLongLevelRuns(const Features& f, const ClassifierConfig& cfg) {
+    const std::size_t n = f.n;
+    if (n < 128) return false;
+    const std::size_t n1 = n - 1;
+    double me = 0.0;
+    for (double e : f.env) me += e;
+    me /= static_cast<double>(n);
+    const double gate = cfg.histEnvRel * me;
+    const std::size_t W = n1 / 256 > 3 ? n1 / 256 : 3;
+    std::vector<double> fm(n1);
+    for (std::size_t i = 0; i < n1; ++i) {
+        std::vector<double> w;
+        w.reserve(2 * W + 1);
+        const std::size_t lo = i >= W / 2 ? i - W / 2 : 0;
+        const std::size_t hi = std::min(n1 - 1, i + W / 2);
+        for (std::size_t j = lo; j <= hi; ++j)
+            if (f.env[j] >= gate) w.push_back(f.finst[j]);
+        if (w.empty()) {
+            fm[i] = f.finst[i];
+            continue;
+        }
+        std::sort(w.begin(), w.end());
+        fm[i] = w[w.size() / 2];
+    }
+    std::vector<double> g;
+    for (std::size_t i = 0; i < n1; ++i)
+        if (f.env[i] >= gate) g.push_back(fm[i]);
+    if (g.size() < 96) return false;
+    double fmin = 1e300, fmax = -1e300;
+    for (double v : g) {
+        fmin = std::min(fmin, v);
+        fmax = std::max(fmax, v);
+    }
+    if (fmax - fmin < 1e-9) return true;  // ein Level = ein langer Run
+    const int Q = 16;
+    const double scale = Q / (fmax - fmin);
+    std::vector<int> bin(n1, -1);
+    std::vector<double> h(static_cast<std::size_t>(Q), 0.0);
+    std::size_t tot = 0;
+    for (std::size_t i = 0; i < n1; ++i) {
+        if (f.env[i] < gate) continue;
+        int b = static_cast<int>((fm[i] - fmin) * scale);
+        if (b >= Q) b = Q - 1;
+        bin[i] = b;
+        h[static_cast<std::size_t>(b)] += 1.0;
+        ++tot;
+    }
+    std::vector<std::size_t> run(static_cast<std::size_t>(Q), 0);
+    std::vector<std::size_t> cur(static_cast<std::size_t>(Q), 0);
+    for (std::size_t i = 0; i < n1; ++i) {
+        if (bin[i] < 0) {
+            std::fill(cur.begin(), cur.end(), 0);
+            continue;
+        }
+        const int b = bin[i];
+        ++cur[static_cast<std::size_t>(b)];
+        run[static_cast<std::size_t>(b)] =
+            std::max(run[static_cast<std::size_t>(b)], cur[static_cast<std::size_t>(b)]);
+        for (int k = 0; k < Q; ++k)
+            if (k != b) cur[static_cast<std::size_t>(k)] = 0;
+    }
+    const std::size_t lMin = tot / 32 > 8 ? tot / 32 : 8;
+    for (int b = 0; b < Q; ++b)
+        if (h[static_cast<std::size_t>(b)] > 0.02 * static_cast<double>(tot) &&
+            run[static_cast<std::size_t>(b)] >= lMin)
+            return true;
+    return false;
 }
 
 // --------------------------------------------------------------------------
@@ -877,7 +1320,9 @@ bool stage1(const Features& f, const ClassifierConfig& cfg,
         *out = CoarseClass::FrequencyModulated;
         return true;
     }
-    if (f.chirpR2 > cfg.tChirpR2 && f.chirpSweep > cfg.tChirpSweep) {
+    if ((f.chirpR2 > cfg.tChirpR2 && f.chirpSweep > cfg.tChirpSweep) ||
+        (f.chirpFoldR2 > cfg.tChirpR2 &&
+         f.chirpFoldSweep > cfg.tChirpSweep)) {
         *out = CoarseClass::FrequencyModulated;
         return true;
     }
@@ -885,7 +1330,10 @@ bool stage1(const Features& f, const ClassifierConfig& cfg,
         *out = CoarseClass::FrequencyModulated;
         return true;
     }
-    if (f.paprWDb > cfg.tPaprOfdmDb && f.cv > cfg.tCvOfdm) {
+    // NoiseLike (OFDM-Verdacht) nur ohne klare 2-PSK-Faltung: BPSK/Barker
+    // haben ein Linienspektrum und erhoehten Huellkurven-Spielraum.
+    if (f.paprWDb > cfg.tPaprOfdmDb && f.cv > cfg.tCvOfdm &&
+        fold2Gated(f, cfg) < cfg.tFold2) {
         *out = CoarseClass::NoiseLike;
         return true;
     }
@@ -971,8 +1419,11 @@ std::pair<ModulationType, double> qamOrder(const std::vector<cd>& s,
 std::pair<ModulationType, double> classifyPhase(const Features& f,
                                                 const ClassifierConfig& cfg,
                                                 const std::vector<cd>& y) {
-    // OFDM via zyklischem Praefix (starke, orthogonale Evidenz)
-    if (y.size() >= cfg.minAnalyzeLen && f.bandBins > cfg.ofdmMinBandBins) {
+    // OFDM via zyklischem Praefix (starke, orthogonale Evidenz). Nicht bei
+    // klarer 2-PSK-Faltung: ein repetitiver Barker-Code hat dieselbe
+    // Periodizitaet wie ein zyklischer Praefix.
+    if (y.size() >= cfg.minAnalyzeLen && f.bandBins > cfg.ofdmMinBandBins &&
+        fold2Gated(f, cfg) < cfg.tFold2) {
         const CpEvidence e = cpAutocorrPeak(y, cfg);
         if (e.rho > cfg.tCpPeak && e.tau >= cfg.tCpMinTau &&
             e.contrast > cfg.tCpContrast && e.clean >= cfg.tCpClean) {
@@ -986,9 +1437,12 @@ std::pair<ModulationType, double> classifyPhase(const Features& f,
             }
         }
     }
-    // OFDM-Fallback: Hoellkurven-Spielraum + glaettendes Spektrum
+    // OFDM-Fallback: Hoellkurven-Spielraum + glaettendes Spektrum. Nicht bei
+    // klarer 2-PSK-Faltung: BPSK/Barker haben ein Linienspektrum (niedriges
+    // flatDb) und duerfen nicht als OFDM fehlgehen.
     if (f.paprWDb > cfg.tPaprOfdmDb &&
-        f.flatDb < cfg.tFlatDb + 1.5) {
+        f.flatDb < cfg.tFlatDb + 1.5 &&
+        fold2Gated(f, cfg) < cfg.tFold2) {
         return {ModulationType::OFDM, 0.5};
     }
     const std::vector<std::size_t> idx = estimateSymbolsRobust(f, cfg);
@@ -1040,13 +1494,24 @@ std::pair<ModulationType, double> classifyPhase(const Features& f,
     const double f2 = foldConc(ph, 2);
     const double f4 = foldConc(ph, 4);
     // PSK: starke Phasenfaltung + Kumulantenpositionierung
+    const double spsEst = idx.size() >= 2
+        ? static_cast<double>(idx.back() - idx.front()) /
+              static_cast<double>(idx.size() - 1)
+        : 8.0;
     if (f2 > cfg.tFold2 && k42 > 1.5) {
+        // Feinklasse: BPSK-Puls mit Barker-Code?
+        const int bl = barkerMatchSlice(y, f, cfg, spsEst);
+        if (bl > 0)
+            return {ModulationType::BarkerCode,
+                    std::min(0.98, 0.65 + 0.02 * bl)};
         return {ModulationType::BPSK, std::min(0.98, 0.5 + f2 * 0.4)};
     }
     if (f4 > cfg.tFold4 && 0.75 < k42 && k42 < 1.35) {
         return {ModulationType::QPSK, std::min(0.98, 0.5 + f4 * 0.4)};
     }
     if (k42 > 1.5 && cvSym < cfg.tCvPskHi) {
+        const int bl = barkerMatchSlice(y, f, cfg, spsEst);
+        if (bl > 0) return {ModulationType::BarkerCode, 0.8};
         return {ModulationType::BPSK, 0.55};
     }
     if (0.8 < k42 && k42 < 1.35 && cvSym < cfg.tCvPskHi && f4 > 0.55) {
@@ -1082,15 +1547,60 @@ std::pair<ModulationType, double> stage2(const Features& f,
         // Frank-Code zuerst: seine Treppe hat zwar eine hohe lineare
         // Komponente, aber die Stufen-Struktur ist spezifischer als der
         // Chirp-Fit.
-        double frankR2 = 0.0;
-        const int frankM = detectFrankOrder(f, cfg, &frankR2);
-        if (frankM >= cfg.tFrankMinModes) {
-            return {ModulationType::FrankCode,
-                    std::min(0.95, 0.55 + 0.4 * frankR2)};
+        // enger Sub-Slice wie beim Fein-Timing (0.25*max): der Matched
+        // Filter arbeitet auf dem Puls ohne Rand-Guards.
+        std::vector<cd> yt = y;
+        {
+            double emax = 0.0;
+            for (const cd& v : y) emax = std::max(emax, std::abs(v));
+            if (emax > 0.0 && y.size() > 2) {
+                const double thr = 0.25 * emax;
+                std::size_t a0 = 0;
+                std::size_t a1 = y.size();
+                while (a0 < y.size() && std::abs(y[a0]) <= thr) ++a0;
+                while (a1 > a0 && std::abs(y[a1 - 1]) <= thr) --a1;
+                if (a1 > a0 && a1 - a0 >= 96)
+                    yt.assign(y.begin() + static_cast<std::ptrdiff_t>(a0),
+                              y.begin() + static_cast<std::ptrdiff_t>(a1));
+            }
         }
-        if (f.chirpR2 > cfg.tChirpR2 && f.chirpSweep > cfg.tChirpSweep) {
+        double frankR2 = 0.0;
+        double platLen = 0.0;
+        const int frankM = detectFrankOrder(f, cfg, &frankR2, &platLen);
+        if (frankM >= cfg.tFrankMinModes) {
+            // Frank vs. P1/P2 per Matched Filter der Phasen-Gesetze
+            // (robust gegen Impulsformung): 0 = Frank, 1/2 = P1/P2.
+            int Mb = frankM;
+            double sc = 0.0, fsc = 0.0;
+            const int law = polyLawMf(yt, frankM, platLen, &Mb, &sc, &fsc);
+            const double conf = std::min(0.95, 0.55 + 0.4 * frankR2);
+            if (law != 0) return {ModulationType::PCode, conf};
+            return {ModulationType::FrankCode, conf};
+        }
+        if ((f.chirpR2 > cfg.tChirpR2 && f.chirpSweep > cfg.tChirpSweep) ||
+        (f.chirpFoldR2 > cfg.tChirpR2 &&
+         f.chirpFoldSweep > cfg.tChirpSweep)) {
             return {ModulationType::Chirp,
                     std::min(0.98, 0.5 + 0.45 * f.chirpR2)};
+        }
+        // P1/P2 kleiner Ordnung: die Stufen sind durch die Impulsformung so
+        // verschmiert, dass das Histogramm keine Treppe findet — die
+        // Phasen-Gesetze per Matched Filter direkt testen, bevor es FSK2 wird.
+        {
+            // ohne lange f_inst-Runs (FSK2/Chirp) lohnt der teure
+            // Matched-Filter nicht — billiger Vorab-Test first.
+            if (hasLongLevelRuns(f, cfg)) {
+                int Mb = 0;
+                double sc = 0.0, fsc = 0.0;
+                const int law = polyLawMf(yt, 8, 0.0, &Mb, &sc, &fsc, false);
+                // deutlich staerkeres Kriterium als im Treppen-Pfad: nur bei
+                // klarem Score-Vorsprung (echte P-Codes: sc > 0.18,
+                // ratio > 2.7; FSK2/PSK-Rauschen: sc < 0.09, ratio < 1.5).
+                if (law != 0 && sc > 0.10 && sc > 1.8 * fsc) {
+                    return {ModulationType::PCode,
+                            std::min(0.9, 0.5 + 2.0 * sc)};
+                }
+            }
         }
         if (f.nfreqModes >= 2) {
             return {ModulationType::FSK2, 0.8};
@@ -1850,6 +2360,175 @@ FrankParams ModulationClassifier::analyzeFrankF(
     return analyzeFrank(buf.data(), buf.size(), pulse);
 }
 
+
+// ---------------------------------------------------------------------------
+// P-Codes (P1..P4, polyphase Radar-Codes anknuepfend an Frank)
+// ---------------------------------------------------------------------------
+// P1/P2 haben M x M Chips mit den Phasen-Gesetzen in polyLawPhase (ihre
+// f_inst-Treppe ist symmetrisch und faellt im entfalteten Frame); P3/P4
+// sind lineare Chirps der Laenge M (werden als Chirp klassifiziert).
+PcodeParams ModulationClassifier::analyzePcode(
+    const std::complex<double>* iq, std::size_t n,
+    const PulseResult& pulse) const {
+    PcodeParams r;
+    if (iq == nullptr || n == 0) return r;
+    if (pulse.modulation != ModulationType::PCode) return r;
+    std::vector<cd> y = extractPulse(iq, n, pulse);
+    sanitizeSlice(y);
+    if (y.size() < cfg_.minAnalyzeLen) return r;
+    {
+        double amax = 0.0;
+        for (const cd& v : y) amax = std::max(amax, std::abs(v));
+        if (amax > 1e100)
+            for (cd& v : y) v /= amax;
+    }
+    // gleiches Slice-Upsampling wie in processSlice
+    std::size_t U = 1;
+    if (cfg_.upsample > 1) {
+        U = static_cast<std::size_t>(cfg_.upsample);
+    } else if (cfg_.upsample == 0 && y.size() < 1024) {
+        const double need = 1024.0 / static_cast<double>(y.size());
+        const double u = std::ceil(need);
+        U = u < 1.0 ? 1 : (u > 8.0 ? 8 : static_cast<std::size_t>(u));
+    }
+    ClassifierConfig cfgA = cfg_;
+    if (U > 1) {
+        cfgA = scaleForUpsample(cfg_, U);
+        y = Channelizer::upsample(y, U);
+    }
+    const double bwFeat = pulse.bandwidthNorm / static_cast<double>(U);
+    const Features f =
+        extractFeatures(y, pulse.centerFreqRefined, bwFeat,
+                        pulse.bandBins * U, pulse.snrDb, pulse.spectralFlatnessDb,
+                        cfgA);
+    double r2 = 0.0;
+    double platLen = 0.0;
+    const int M0 = detectFrankOrder(f, cfgA, &r2, &platLen);
+    int Mb = M0 > 0 ? M0 : 8;
+    double sc = 0.0, fsc = 0.0;
+    const int law = polyLawMf(y, Mb, platLen, &Mb, &sc, &fsc);
+    if (law == 0 || Mb < cfg_.tFrankMinModes) return r;  // ist Frank, nicht P
+    int MbL = Mb;
+    double lerr = 0.0;
+    polyLawMatch(y, f, Mb, platLen, &MbL, &lerr);
+    r.valid = true;
+    r.subtype = law;  // 1 = P1, 2 = P2
+    r.order = Mb;
+    r.codeLength = static_cast<std::size_t>(Mb) * Mb;
+    r.startSample = pulse.startSampleFine;
+    r.numSamples = pulse.numSamplesFine;
+    r.centerFreqNorm = pulse.centerFreqRefined;
+    r.bandwidthNorm = pulse.bandwidthNorm;
+    r.snrDb = pulse.snrDb;
+    r.r2 = r2;
+    r.lawErr = lerr;
+    const double chipLen = static_cast<double>(y.size()) /
+                           static_cast<double>(r.codeLength) /
+                           static_cast<double>(U);
+    r.chipRateNorm = chipLen > 1e-9 ? 1.0 / chipLen : 0.0;
+    // Code-Phasen an den Chip-Mitten (Resttraeger derotiert)
+    r.codePhases.resize(r.codeLength);
+    const double phStep = 2.0 * kPi * f.residF;
+    const double chipLenUp = chipLen * static_cast<double>(U);
+    for (std::size_t k = 0; k < r.codeLength; ++k) {
+        const std::size_t ci = static_cast<std::size_t>(
+            (static_cast<double>(k) + 0.5) * chipLenUp);
+        if (ci >= y.size()) {
+            r.codePhases[k] = 0.0;
+            continue;
+        }
+        double w = std::atan2(y[ci].imag(), y[ci].real()) -
+                   phStep * static_cast<double>(ci);
+        w = std::fmod(w, 2.0 * kPi);
+        if (w < 0.0) w += 2.0 * kPi;
+        r.codePhases[k] = w;
+    }
+    return r;
+}
+
+PcodeParams ModulationClassifier::analyzePcodeF(
+    const std::complex<float>* iq, std::size_t n,
+    const PulseResult& pulse) const {
+    if (iq == nullptr || n == 0) return PcodeParams{};
+    std::vector<std::complex<double>> buf(n);
+    for (std::size_t i = 0; i < n; ++i)
+        buf[i] = std::complex<double>(static_cast<double>(iq[i].real()),
+                                      static_cast<double>(iq[i].imag()));
+    return analyzePcode(buf.data(), buf.size(), pulse);
+}
+
+// ---------------------------------------------------------------------------
+// Barker-Code (BPSK-Puls mit Barker-Folge)
+// ---------------------------------------------------------------------------
+BarkerParams ModulationClassifier::analyzeBarker(
+    const std::complex<double>* iq, std::size_t n,
+    const PulseResult& pulse) const {
+    BarkerParams r;
+    if (iq == nullptr || n == 0) return r;
+    if (pulse.modulation != ModulationType::BarkerCode) return r;
+    std::vector<cd> y = extractPulse(iq, n, pulse);
+    sanitizeSlice(y);
+    if (y.size() < cfg_.minAnalyzeLen) return r;
+    {
+        double amax = 0.0;
+        for (const cd& v : y) amax = std::max(amax, std::abs(v));
+        if (amax > 1e100)
+            for (cd& v : y) v /= amax;
+    }
+    // gleiches Slice-Upsampling wie in processSlice
+    std::size_t U = 1;
+    if (cfg_.upsample > 1) {
+        U = static_cast<std::size_t>(cfg_.upsample);
+    } else if (cfg_.upsample == 0 && y.size() < 1024) {
+        const double need = 1024.0 / static_cast<double>(y.size());
+        const double u = std::ceil(need);
+        U = u < 1.0 ? 1 : (u > 8.0 ? 8 : static_cast<std::size_t>(u));
+    }
+    ClassifierConfig cfgA = cfg_;
+    if (U > 1) {
+        cfgA = scaleForUpsample(cfg_, U);
+        y = Channelizer::upsample(y, U);
+    }
+    const double bwFeat = pulse.bandwidthNorm / static_cast<double>(U);
+    const Features f =
+        extractFeatures(y, pulse.centerFreqRefined, bwFeat,
+                        pulse.bandBins * U, pulse.snrDb, pulse.spectralFlatnessDb,
+                        cfgA);
+    const std::vector<std::size_t> idx = estimateSymbolsRobust(f, cfgA);
+    const double spsEst = idx.size() >= 2
+        ? static_cast<double>(idx.back() - idx.front()) /
+              static_cast<double>(idx.size() - 1)
+        : 8.0;
+    int reps = 0;
+    double sc = 0.0, spsB = spsEst;
+    const int bl = barkerMatchSlice(y, f, cfgA, spsEst, &reps, &sc, &spsB);
+    if (bl <= 0) return r;
+    static const int b13[] = {1, 1, 1, 1, 1, -1, -1, 1, 1, -1, 1, -1, 1};
+    static const int b11[] = {1, 1, 1, -1, -1, -1, 1, -1, -1, 1, -1};
+    static const int b7[] = {1, 1, 1, -1, -1, 1, -1};
+    const int* seq = bl == 13 ? b13 : (bl == 11 ? b11 : b7);
+    r.valid = true;
+    r.length = bl;
+    r.code.assign(seq, seq + bl);
+    r.repeats = reps;
+    r.sps = spsB / static_cast<double>(U);
+    r.carrierFreqNorm = pulse.centerFreqRefined;
+    r.carrierPhaseAtStart = 0.0;
+    r.snrDb = pulse.snrDb;
+    return r;
+}
+
+BarkerParams ModulationClassifier::analyzeBarkerF(
+    const std::complex<float>* iq, std::size_t n,
+    const PulseResult& pulse) const {
+    if (iq == nullptr || n == 0) return BarkerParams{};
+    std::vector<std::complex<double>> buf(n);
+    for (std::size_t i = 0; i < n; ++i)
+        buf[i] = std::complex<double>(static_cast<double>(iq[i].real()),
+                                      static_cast<double>(iq[i].imag()));
+    return analyzeBarker(buf.data(), buf.size(), pulse);
+}
+
 // ---------------------------------------------------------------------------
 // Symbol-Schnittstelle (PSK + FSK)
 // ---------------------------------------------------------------------------
@@ -1859,7 +2538,8 @@ SymbolStream ModulationClassifier::extractSymbols(
     SymbolStream r;
     if (iq == nullptr || n == 0) return r;
     if (pulse.modulation == ModulationType::BPSK ||
-        pulse.modulation == ModulationType::QPSK) {
+        pulse.modulation == ModulationType::QPSK ||
+        pulse.modulation == ModulationType::BarkerCode) {
         PskSync s = synchronizePsk(iq, n, pulse);
         if (!s.valid) return r;
         r.valid = true;

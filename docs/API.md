@@ -10,7 +10,10 @@ Namespace `iqclassify`. Schirmheader:
         Unknown,        // nicht entscheidbar (zu wenig SNR/Struktur)
         Unmodulated,    // unmodulierter Träger (CW)
         BPSK, QPSK, FSK2, Chirp, OFDM,
-        QAM16, QAM64, QAM256
+        QAM16, QAM64, QAM256,
+        FrankCode,      // polyphase Frank-Code (Radar), Ordnung M
+        PCode,          // P1/P2-Code (polyphase Radar-Code); P3/P4 -> Chirp
+        BarkerCode      // BPSK-Puls mit Barker-Folge 7/11/13 (ggf. wiederholt)
     };
 
     enum class CoarseClass : std::uint8_t {
@@ -218,6 +221,19 @@ Schwerpunkt, so breit wie der Bereich inkl. Waechter).
   Code-Phasen in [0, 2pi), Chip k = i*M+j mit Phase ~ 2*pi*i*j/M).
   `analyzeFrankF` ist die float-Variante. Fuer andere Modulationen ist
   `valid == false`.
+- `analyzePcode(iq, n, pulse)` liefert fuer `PCode`-Pulse (P1/P2) alle
+  Parameter: `subtype` (1 = P1, 2 = P2), `order` (M), `codeLength` (N = M^2),
+  `chipRateNorm`, `centerFreqNorm`, `bandwidthNorm`, `snrDb`, `r2` (R^2 der
+  Stufen-Mitten), `lawErr` (RMS-Phasenfehler gegen das Phasen-Gesetz) und
+  `codePhases` (N Werte in [0, 2pi), Chip k = i*M+j). Erkennung: Treppe der
+  Momentanfrequenz plus Matched-Filter-Vergleich der Phasen-Gesetze
+  (Frank/P1/P2); P3/P4 werden als `Chirp` klassifiziert.
+  `analyzePcodeF` ist die float-Variante.
+- `analyzeBarker(iq, n, pulse)` liefert fuer `BarkerCode`-Pulse: `length`
+  (7/11/13), `code` (+/-1 je Chip), `repeats` (erkannte Perioden), `sps`
+  (Samples pro Chip), `carrierFreqNorm`, `snrDb`. Erkennung: Barker-Match
+  direkt auf dem Slice (Symboltakt fein gesucht, alle Rotationen/Vorzeichen).
+  `analyzeBarkerF` ist die float-Variante.
 
 ## ClassifierConfig
 

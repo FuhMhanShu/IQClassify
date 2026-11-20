@@ -10,6 +10,8 @@
 //                      lokalisierten Pulsen (feine Fenster, Baender, f_ref)
 //   spectrogram.png  - Spektrogramm des Demo-Puffers mit ueberlagerten
 //                      Puls-Rechtecken (Zeit x Frequenz)
+//   codes.png        - f_inst-Treppen/Sweeps von Polyphase-Codes (Frank,
+//                      P1, P2, P3, P4) und Barker13 mit echtem Label
 //
 // Reiner C++17-Code ohne externe Abhaengigkeiten: PNG (Palette, zlib
 // Stored-Blocks) und 5x7-Bitmap-Font sind eingebettet.
@@ -631,6 +633,138 @@ void renderSpectrogram(const Demo& d, const std::string& outDir) {
         std::fprintf(stderr, "Fehler beim Schreiben von spectrogram.png\n");
 }
 
+// ---------------------------------------------------------------------------
+// Bild 4: Polyphase-Codes und Barker-Code mit echtem Klassifikations-Label
+// ---------------------------------------------------------------------------
+struct CodeDemo {
+    std::string title;
+    std::vector<iqtest::cd> sig;
+    double fc;
+};
+
+void renderCodes(const std::string& outDir) {
+    std::vector<CodeDemo> demos;
+    {
+        std::mt19937 rng(9);
+        demos.push_back({"FRANK M=8 (SPS=8, F=0.15)", iqtest::genFrank(rng, 8, 8), 0.15});
+    }
+    for (int pp : {1, 2}) {
+        std::mt19937 rng(50 + pp);
+        char t[64];
+        std::snprintf(t, sizeof(t), "P%d M=8 (SPS=8, F=0.15)", pp);
+        demos.push_back({t, iqtest::genPcode(rng, pp, 8, 8), 0.15});
+    }
+    {
+        std::mt19937 rng(70);
+        demos.push_back({"P3 M=64 (SPS=8, F=0.15)", iqtest::genPcode(rng, 3, 64, 8), 0.15});
+    }
+    {
+        std::mt19937 rng(71);
+        demos.push_back({"P4 M=64 (SPS=8, F=0.15)", iqtest::genPcode(rng, 4, 64, 8), 0.15});
+    }
+    {
+        std::mt19937 rng(100);
+        demos.push_back({"BARKER13 x8 (SPS=8, F=0.15)", iqtest::genBarker(rng, 13, 8, 8), 0.15});
+    }
+
+    const int W = 1160, H = 920;
+    Canvas c(W, H, 0);
+    const uint8_t white = c.color(255, 255, 255);
+    const uint8_t black = c.color(20, 20, 20);
+    const uint8_t gray = c.color(150, 150, 150);
+    const uint8_t lgray = c.color(228, 228, 228);
+    const uint8_t blue = c.color(41, 98, 180);
+    const uint8_t red = c.color(200, 40, 40);
+    const uint8_t green = c.color(46, 150, 60);
+    c.fillRect(0, 0, W - 1, H - 1, white);
+    c.text(20, 12, "POLYPHASE-CODES UND BARKER-CODE: F_INST DES PULSES UND KLASSIFIKATIONS-LABEL (SNR 20 DB)", 2, black);
+    c.hline(20, W - 20, 38, gray);
+
+    iqclassify::ClassifierConfig cfg;
+    iqclassify::ModulationClassifier clf(cfg);
+
+    const int cols = 2, rows = 3;
+    const int ml = 20, mt = 56, gap = 16;
+    const int pw = (W - 2 * ml - (cols - 1) * gap) / cols;   // 554
+    const int ph = (H - mt - (rows - 1) * gap - 30) / rows;  // ~272
+
+    for (std::size_t i = 0; i < demos.size(); ++i) {
+        const auto& dm = demos[i];
+        const int x0 = ml + static_cast<int>(i % cols) * (pw + gap);
+        const int y0 = mt + static_cast<int>(i / cols) * (ph + gap);
+        // Klassifikation des echten Puffers
+        iqtest::Recorder rec;
+        rec.silence(2000);
+        rec.add(dm.sig, dm.fc, 20.0);
+        rec.silence(2000);
+        const auto res = clf.classify(rec.buffer().data(), rec.buffer().size());
+        std::string label = res.empty() ? "KEIN PULS" :
+                            iqclassify::toString(res[0].modulation);
+        std::string sub;
+        if (!res.empty() && res[0].modulation == iqclassify::ModulationType::PCode) {
+            const auto pp = clf.analyzePcode(rec.buffer().data(), rec.buffer().size(), res[0]);
+            if (pp.valid) {
+                char b[64];
+                std::snprintf(b, sizeof(b), " SUBTYP P%d, M=%d, N=%zu", pp.subtype, pp.order, pp.codeLength);
+                sub = b;
+            }
+        }
+        if (!res.empty() && res[0].modulation == iqclassify::ModulationType::BarkerCode) {
+            const auto bp = clf.analyzeBarker(rec.buffer().data(), rec.buffer().size(), res[0]);
+            if (bp.valid) {
+                char b[64];
+                std::snprintf(b, sizeof(b), " LEN=%d, REPS=%d, SPS=%.1f", bp.length, bp.repeats, bp.sps);
+                sub = b;
+            }
+        }
+        // Panel
+        c.rect(x0, y0, x0 + pw - 1, y0 + ph - 1, black);
+        c.text(x0 + 8, y0 + 6, dm.title, 1, black);
+        const std::string lab = "-> " + label + sub;
+        c.text(x0 + 8, y0 + 20, lab, 1, red);
+        // f_inst des Basisband-Pulses
+        const auto& sig = dm.sig;
+        const std::size_t n = sig.size();
+        std::vector<double> up = iqclassify::detail::unwrapPhase(sig);
+        std::vector<double> fi(n >= 1 ? n - 1 : 0);
+        for (std::size_t k = 0; k + 1 < n; ++k)
+            fi[k] = (up[k + 1] - up[k]) / (2.0 * M_PI);
+        double fmin = 1e300, fmax = -1e300;
+        for (double v : fi) {
+            fmin = std::min(fmin, v);
+            fmax = std::max(fmax, v);
+        }
+        if (fmax - fmin < 1e-9) fmax = fmin + 1e-9;
+        const int gx0 = x0 + 10, gy0 = y0 + 44, gw = pw - 20, gh = ph - 60;
+        c.rect(gx0, gy0, gx0 + gw - 1, gy0 + gh - 1, lgray);
+        const double mid = 0.5 * (fmin + fmax);
+        c.hline(gx0, gx0 + gw - 1, gy0 + gh / 2, gray);
+        c.text(gx0 - 0, gy0 + gh + 4, "SAMPLES", 1, black);
+        c.text(gx0, gy0 - 10, fmt(fmax, 4), 1, gray);
+        c.text(gx0, gy0 + gh - 2, fmt(fmin, 4), 1, gray);
+        c.text(gx0 + gw - 34, gy0 - 10, "F_INST", 1, gray);
+        const int colPerSample = std::max(1, static_cast<int>(n / gw));
+        for (int x = 0; x < gw; ++x) {
+            const std::size_t k0 = static_cast<std::size_t>(x) * n / gw;
+            const std::size_t k1 = std::min(fi.size(), k0 + colPerSample + 1);
+            double lo = 1e300, hi = -1e300;
+            for (std::size_t k = k0; k < k1; ++k) {
+                lo = std::min(lo, fi[k]);
+                hi = std::max(hi, fi[k]);
+            }
+            if (lo > hi) continue;
+            auto Y = [&](double v) {
+                return gy0 + gh - 1 - static_cast<int>((v - fmin) / (fmax - fmin) * (gh - 1));
+            };
+            c.vline(gx0 + x, std::max(gy0, Y(hi)), std::min(gy0 + gh - 1, Y(lo)), blue);
+        }
+        (void)green;
+    }
+    c.text(20, H - 18, "BLAU: MOMENTANFREQUENZ F_INST DES GENERIRTEN PULSES   ROT: LABEL DES KLASSIFIKATORS (ECHTE PIPELINE)", 1, gray);
+    if (!c.save(outDir + "/codes.png"))
+        std::fprintf(stderr, "Fehler beim Schreiben von codes.png\n");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -645,6 +779,7 @@ int main(int argc, char** argv) {
     renderPipeline(outDir);
     renderDetection(d, outDir);
     renderSpectrogram(d, outDir);
+    renderCodes(outDir);
     std::printf("Bilder geschrieben nach %s\n", outDir.c_str());
     return 0;
 }

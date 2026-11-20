@@ -148,6 +148,88 @@ Features extractFeatures(const std::vector<std::complex<double>>& y,
         f.chirpR2 = 1.0 - ssRes / (ssTot > 1e-30 ? ssTot : 1e-30);
         f.chirpSweep = std::abs(slope) * static_cast<double>(iHi - iLo) /
                        (bw > 1e-9 ? bw : 1e-9);
+        // Gefalteter Chirp (V-Form): Extremlage von f_inst suchen, beide
+        // Haelften getrennt linear fitten. Nur gesetzt, wenn beide Haelften
+        // hochkorreliert sind und gegenlaeufige Steigungen haben.
+        auto fitHalf = [&](std::size_t a, std::size_t b, double* r2,
+                           double* sl) {
+            double sw = 0.0, xm = 0.0, ym2 = 0.0;
+            for (std::size_t i = a; i < b; ++i) {
+                const double w = f.env[i] * f.env[i];
+                sw += w;
+                xm += w * static_cast<double>(i);
+                ym2 += w * f.finst[i];
+            }
+            if (sw <= 1e-30) {
+                *r2 = 0.0;
+                *sl = 0.0;
+                return;
+            }
+            xm /= sw;
+            ym2 /= sw;
+            double num = 0.0, den = 0.0, ssTot = 0.0;
+            for (std::size_t i = a; i < b; ++i) {
+                const double w = f.env[i] * f.env[i];
+                const double dx = static_cast<double>(i) - xm;
+                num += w * dx * (f.finst[i] - ym2);
+                den += w * dx * dx;
+                ssTot += w * (f.finst[i] - ym2) * (f.finst[i] - ym2);
+            }
+            *sl = num / (den > 1e-30 ? den : 1e-30);
+            double ssRes = 0.0;
+            for (std::size_t i = a; i < b; ++i) {
+                const double w = f.env[i] * f.env[i];
+                const double resid =
+                    f.finst[i] - (ym2 + *sl * (static_cast<double>(i) - xm));
+                ssRes += w * resid * resid;
+            }
+            *r2 = ssTot > 1e-30 ? 1.0 - ssRes / ssTot : 0.0;
+        };
+        // Saegezahn-Erkennung: groesster Abfall von f_inst an einer inneren
+        // Stelle (Faltung am Chip-Rand, z. B. P3-Code); beide Seiten muessen
+        // linear mit gleichsinniger Steigung sein (entfalteter Chirp).
+        std::size_t iPk = iLo;
+        double dropBest = 0.0;
+        std::vector<double> gf;
+        for (std::size_t i = iLo; i < iHiEff; ++i) {
+            if (f.env[i] < 0.4 * me) continue;
+            gf.push_back(f.finst[i]);
+            if (i + 1 < iHiEff && f.env[i + 1] >= 0.4 * me) {
+                const double d = f.finst[i] - f.finst[i + 1];
+                if (d > dropBest) {
+                    dropBest = d;
+                    iPk = i + 1;
+                }
+            }
+        }
+        // robuste Auslenkung (Perzentile, gegen Ausreisser an Chip-Raendern)
+        double range = 0.0;
+        if (gf.size() > 16) {
+            std::sort(gf.begin(), gf.end());
+            const double q05 = gf[static_cast<std::size_t>(
+                0.05 * static_cast<double>(gf.size() - 1))];
+            const double q95 = gf[static_cast<std::size_t>(
+                0.95 * static_cast<double>(gf.size() - 1))];
+            range = q95 - q05;
+        }
+        // Rand um den Sprung herum aussparen (der Abfall ist durch die
+        // Impulsformung ueber einige Samples verschmiert).
+        const std::size_t marg = (iHiEff - iLo) / 10;
+        if (dropBest > 0.5 * range && range > 0.0 &&
+            iPk > iLo + marg + (iHiEff - iLo) / 5 &&
+            iPk < iHiEff - marg - (iHiEff - iLo) / 5) {
+            double r2L = 0.0, r2R = 0.0, sL = 0.0, sR = 0.0;
+            fitHalf(iLo, iPk - marg, &r2L, &sL);
+            fitHalf(iPk + marg, iHiEff, &r2R, &sR);
+            if (r2L > 0.0 && r2R > 0.0 && sL * sR > 0.0) {
+                f.chirpFoldR2 = std::min(r2L, r2R);
+                f.chirpFoldSweep =
+                    (std::abs(sL) * static_cast<double>(iPk - marg - iLo) +
+                     std::abs(sR) * static_cast<double>(iHiEff - iPk - marg) +
+                     dropBest) /
+                    (bw > 1e-9 ? bw : 1e-9);
+            }
+        }
     }
     // Dwell-Anteil: Schwelle relativ zum 90. Perzentil von |f_inst|
     {

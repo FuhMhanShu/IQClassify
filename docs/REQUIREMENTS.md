@@ -9,7 +9,9 @@ Klassifikation der Modulationsart von Pulsen in komplexen IQ-Abtastströmen
   Phasenmodulation (PSK/QAM), flächiges rauschartiges Signal (OFDM).
 - Stufe 2, Modulationsart: Unmodulated (unmodulierter Träger, CW), BPSK,
   QPSK, FSK2, Chirp, OFDM, QAM16, QAM64, QAM256, FrankCode (polyphase
-  Frank-Code, Radar). Nicht entscheidbare Pulse werden als Unknown mit
+  Frank-Code, Radar), PCode (P1/P2; P3/P4 erscheinen als Chirp) und
+  BarkerCode (BPSK mit Barker-Folge 7/11/13). Nicht entscheidbare Pulse
+  werden als Unknown mit
   niedriger Konfidenz ausgegeben.
 
 ## Mehrpuls-Szenarien
@@ -78,6 +80,33 @@ Auch Signale unterhalb von 6 dB SNR müssen erkannt werden, Ziel ~2 dB:
   niedrigem SNR in Subbaender zerfallen (dann mehrere FrankCode-Pulse);
   direkt an einen starken CW grenzende kurze Pulse teilen sich ein
   Zeitsegment und werden als ein Puls behandelt (bekannte Segment-Grenze).
+
+## P-Codes (P1..P4) und Barker-Codes
+
+- P1/P2-Code der Ordnung M (Laenge N = M^2 Chips, Phasen-Gesetz
+  `-(pi/M)(M-2i)(M-2j)` bzw. `-(pi/M)(M-2i)(M-2j-1)`) wird als `PCode`
+  klassifiziert. Erkannt ueber die `f_inst`-Treppe (wie Frank) plus
+  Matched-Filter-Vergleich der Phasen-Gesetze gegen Frank/P1/P2
+  (`polyLawMf`, Chip-Rate fein um n/M^2 gesucht); ohne erkennbare Treppe
+  (kleine Ordnung, starke Impulsformung) greift ein strengerer Fallback
+  (Score > 0.10 und Ratio > 1.8), damit FSK2 nicht als PCode durchgeht.
+- P3/P4 (Chirp-artig, Laenge M) werden als `Chirp` klassifiziert; P3
+  erscheint durch Faltung am Chip-Rand als Saegezahn in `f_inst` und wird
+  ueber den gefalteten Chirp-Test erkannt.
+- Analyse-API `analyzePcode`: Subtyp (1 = P1, 2 = P2), Ordnung M,
+  Code-Laenge N = M^2, Chip-Rate, Mittenfrequenz, SNR, R^2, lawErr und die
+  N geschaetzten Code-Phasen.
+- Barker-Code (BPSK-Puls mit Barker-Folge 7/11/13, wiederholt) wird als
+  `BarkerCode` fein-klassifiziert: Barker-Match direkt auf dem Slice
+  (Symboltakt fein gesucht, alle Rotationen und Vorzeichen, >= 95 %
+  Uebereinstimmung). Repetitive Barker-Codes haben ein Linienspektrum und
+  CP-aehnliche Periodizitaet — die OFDM-Tests sind deshalb gegen 2-PSK-
+  Faltung abgesichert. Analyse-API `analyzeBarker`: Code, Laenge,
+  Wiederholungen, sps, Traeger.
+- Testgeneratoren `iqtest::genPcode(rng, p, M, sps)` (p = 1..4) und
+  `iqtest::genBarker(rng, len, sps, repeats)`; Testsuite Szenarien 22 und 23
+  (inkl. Negativtests: FSK2 bleibt FSK2, zufaelliger BPSK bleibt BPSK).
+- Doku mit Bildern: docs/MODULATIONEN.md.
 
 ## Analyse-API je erkanntem Puls
 

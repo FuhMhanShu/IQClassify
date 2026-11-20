@@ -93,6 +93,9 @@ struct ClassifierConfig {
     double tFrankMassEq = 6.0;   // erlaubtes max/min der Stufen-Massen
     double tFrankCover = 0.40;   // Anteil der gated Samples in Stufen
     double tFrankMono = 0.80;    // Anteil der monotonen (zyklischen) Stufenfolge
+    int tBarkerMinLen = 7;       // kleinste Barker-Laenge, die als BarkerCode
+                                 // gelabelt wird (kuerzere Folgen sind von
+                                 // Zufalls-BPSK nicht unterscheidbar)
     double tPaprOfdmDb = 6.0;    // Fenstergemitteltes (16) PAPR der OFDM-Gruppe
     double tCvOfdm = 0.40;       // Hoellkurven-CV der OFDM-Gruppe
 

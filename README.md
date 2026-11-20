@@ -12,7 +12,13 @@ klassifiziert die Modulationsart jedes Pulses in zwei Stufen:
 - Stufe 2 (fein): Unmodulated (CW), BPSK, QPSK, FSK2, Chirp, OFDM,
   QAM16, QAM64, QAM256, FrankCode (polyphase Frank-Code, Radar: Treppe der
   Momentanfrequenz mit M Stufen; Analyse via `analyzeFrank`: Ordnung M,
-  Code-Laenge M^2, Chip-Rate, Code-Phasen).
+  Code-Laenge M^2, Chip-Rate, Code-Phasen), PCode (P1/P2, polyphase
+  Radar-Codes mit eigener Frequenz-Treppe; P3/P4 erscheinen als Chirp;
+  Analyse via `analyzePcode`: Subtyp, Ordnung M, Code-Phasen) und
+  BarkerCode (BPSK-Puls mit Barker-Folge 7/11/13; Analyse via
+  `analyzeBarker`: Code, Wiederholungen, Chip-Rate).
+  Uebersicht aller klassifizierbaren Modulationsarten mit Bildern:
+  [docs/MODULATIONEN.md](docs/MODULATIONEN.md).
 
 ## Merkmale
 
@@ -159,6 +165,12 @@ detektierte Baender (blau) und Sub-Bin-Mittenfrequenzen (farbige Linien).
 Spektrogramm desselben Puffers mit den Puls-Rechtecken (Zeit x Frequenz) aus
 den Klassifikationsergebnissen.
 
+![Polyphase-Codes und Barker-Code](docs/images/codes.png)
+
+Momentanfrequenz (f_inst) je eines Frank-, P1-, P2-, P3-, P4- und
+Barker13-Pulses mit dem echten Label der Pipeline (rot) inkl. Analyse-Infos
+(Subtyp/Ordnung bzw. Code-Laenge/Wiederholungen).
+
 Die Bilder werden deterministisch aus einem Demo-Puffer und den echten
 Klassifikationsergebnissen erzeugt (aus dem Repo-Root):
 
@@ -169,6 +181,7 @@ Klassifikationsergebnissen erzeugt (aus dem Repo-Root):
 
 - `docs/REQUIREMENTS.md` Anforderungen und Leistungsumfang
 - `docs/METHODOLOGY.md` Methodik, Schwellwerte, Validierung, Grenzen
+- `docs/MODULATIONEN.md` klassifizierbare Modulationsarten mit Bildern
 - `docs/API.md`   Programmierschnittstelle
 
 ## Verzeichnisstruktur

@@ -82,6 +82,22 @@ public:
     FrankParams analyzeFrankF(const std::complex<float>* iq, std::size_t n,
                               const PulseResult& pulse) const;
 
+    // Parameter eines erkannten P1/P2-Codes (polyphase Radar-Code):
+    // Subtyp (1 = P1, 2 = P2), Ordnung M, Code-Laenge M^2, Chip-Rate,
+    // Code-Phasen und RMS-Fehler gegen das Phasen-Gesetz. Nur fuer PCode.
+    PcodeParams analyzePcode(const std::complex<double>* iq, std::size_t n,
+                             const PulseResult& pulse) const;
+    PcodeParams analyzePcodeF(const std::complex<float>* iq, std::size_t n,
+                              const PulseResult& pulse) const;
+
+    // Parameter eines erkannten Barker-Codes (BPSK-Puls): Laenge (7/11/13),
+    // +/-1-Chipfolge, Wiederholungen, Chip-Rate (sps), Traeger. Nur fuer
+    // BarkerCode.
+    BarkerParams analyzeBarker(const std::complex<double>* iq, std::size_t n,
+                               const PulseResult& pulse) const;
+    BarkerParams analyzeBarkerF(const std::complex<float>* iq, std::size_t n,
+                                const PulseResult& pulse) const;
+
     // Symbol-Schnittstelle fuer PSK und FSK: liefert Symboltakt und Symbole
     // (PSK) bzw. Frequenz/Ton-Entscheidung pro Symbol (FSK2). Fuer andere
     // Modulationen ist valid == false.

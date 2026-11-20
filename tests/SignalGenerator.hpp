@@ -38,6 +38,24 @@ std::vector<cd> genChirp(std::size_t nsamp, double bw, bool up = true);
 std::vector<cd> genFrank(std::mt19937& rng, int m, int sps,
                          double alpha = 0.25);
 
+// P-Code (polyphase Radar-Code, Lewis-Kretschmer), p = 1..4:
+//   P1: Laenge M^2, Phase(m,n) = -(pi/M)(M-2m)(M-2n)
+//   P2: Laenge M^2, Phase(m,n) = -(pi/M)(M-2m)(M-2n-1)
+//   P3: Laenge M,   Phase(m)   =  (pi/M) m^2          (Chirp-artig)
+//   P4: Laenge M,   Phase(m)   =  (pi/M) m^2 - pi m   (Chirp-artig)
+// Chips RRC-geformt mit sps Samples (alpha). P1/P2 bilden wie der Frank-Code
+// eine Frequenz-Treppe, P3/P4 sind lineare Chirps.
+std::vector<cd> genPcode(std::mt19937& rng, int p, int m, int sps,
+                         double alpha = 0.25);
+
+// Barker-Code der Laenge len (2,3,4,5,7,11,13) als BPSK-Puls: Chips +/-1
+// nach der Barker-Folge, repeats Perioden, RRC-geformt mit sps Samples.
+std::vector<cd> genBarker(std::mt19937& rng, int len, int sps,
+                          int repeats = 1, double alpha = 0.25);
+
+// Bekannte Barker-Folgen (+1/-1), Index = Laenge.
+const std::vector<int>& barkerSeq(int len);
+
 // Unmodulierter Traeger (CW) mit Zufallsphase.
 std::vector<cd> genCw(std::mt19937& rng, std::size_t nsamp);
 
