@@ -110,10 +110,24 @@ Features extractFeatures(const std::vector<std::complex<double>>& y,
         }
         f.paprWDb = detail::db10(wmax / (W * pm > 1e-30 ? W * pm : 1e-30));
     }
-    // Chirp-Fit auf f_inst, hoellkurven^2-gewichtet, mittlere 80 %
+    // Chirp-Fit auf geglaetteter f_inst (finstSm), hoellkurven^2-gewichtet,
+    // mittlere 80 %. Die Glaettung (gleitendes Mittel ueber ~n/32 Samples,
+    // O(n)) unterdrueckt Ausreisser/Entpackungsfehler, die bei stark
+    // verrauschtem f_inst sonst das Fit-R^2 ruinieren.
     const std::size_t n1 = n >= 1 ? n - 1 : 0;
     const std::size_t iLo = n1 / 10;
     const std::size_t iHi = n1 - n1 / 10;
+    {
+        const std::size_t Wsm = n1 / 32 > 8 ? n1 / 32 : 8;
+        f.finstSm.assign(n1, 0.0);
+        double acc = 0.0;
+        for (std::size_t i = 0; i < n1; ++i) {
+            acc += f.finst[i];
+            if (i >= Wsm) acc -= f.finst[i - Wsm];
+            const std::size_t cnt = std::min(i + 1, Wsm);
+            f.finstSm[i] = acc / static_cast<double>(cnt);
+        }
+    }
     {
         double sw = 0.0;
         double xm = 0.0;
@@ -123,7 +137,7 @@ Features extractFeatures(const std::vector<std::complex<double>>& y,
             const double w = f.env[i] * f.env[i];
             sw += w;
             xm += w * static_cast<double>(i);
-            ym += w * f.finst[i];
+            ym += w * f.finstSm[i];
         }
         xm /= sw > 1e-30 ? sw : 1e-30;
         ym /= sw > 1e-30 ? sw : 1e-30;
@@ -133,32 +147,33 @@ Features extractFeatures(const std::vector<std::complex<double>>& y,
         for (std::size_t i = iLo; i < iHiEff; ++i) {
             const double w = f.env[i] * f.env[i];
             const double dx = static_cast<double>(i) - xm;
-            num += w * dx * (f.finst[i] - ym);
+            num += w * dx * (f.finstSm[i] - ym);
             den += w * dx * dx;
-            ssTot += w * (f.finst[i] - ym) * (f.finst[i] - ym);
+            ssTot += w * (f.finstSm[i] - ym) * (f.finstSm[i] - ym);
         }
         const double slope = num / (den > 1e-30 ? den : 1e-30);
         double ssRes = 0.0;
         for (std::size_t i = iLo; i < iHiEff; ++i) {
             const double w = f.env[i] * f.env[i];
-            const double resid = f.finst[i] -
+            const double resid = f.finstSm[i] -
                 (ym + slope * (static_cast<double>(i) - xm));
             ssRes += w * resid * resid;
         }
         f.chirpR2 = 1.0 - ssRes / (ssTot > 1e-30 ? ssTot : 1e-30);
         f.chirpSweep = std::abs(slope) * static_cast<double>(iHi - iLo) /
                        (bw > 1e-9 ? bw : 1e-9);
+        f.chirpSweepAbs = std::abs(slope) * static_cast<double>(iHi - iLo);
         // Gefalteter Chirp (V-Form): Extremlage von f_inst suchen, beide
         // Haelften getrennt linear fitten. Nur gesetzt, wenn beide Haelften
         // hochkorreliert sind und gegenlaeufige Steigungen haben.
-        auto fitHalf = [&](std::size_t a, std::size_t b, double* r2,
-                           double* sl) {
+        auto fitHalf = [&](const std::vector<double>& fi, std::size_t a,
+                           std::size_t b, double* r2, double* sl) {
             double sw = 0.0, xm = 0.0, ym2 = 0.0;
             for (std::size_t i = a; i < b; ++i) {
                 const double w = f.env[i] * f.env[i];
                 sw += w;
                 xm += w * static_cast<double>(i);
-                ym2 += w * f.finst[i];
+                ym2 += w * fi[i];
             }
             if (sw <= 1e-30) {
                 *r2 = 0.0;
@@ -171,16 +186,16 @@ Features extractFeatures(const std::vector<std::complex<double>>& y,
             for (std::size_t i = a; i < b; ++i) {
                 const double w = f.env[i] * f.env[i];
                 const double dx = static_cast<double>(i) - xm;
-                num += w * dx * (f.finst[i] - ym2);
+                num += w * dx * (fi[i] - ym2);
                 den += w * dx * dx;
-                ssTot += w * (f.finst[i] - ym2) * (f.finst[i] - ym2);
+                ssTot += w * (fi[i] - ym2) * (fi[i] - ym2);
             }
             *sl = num / (den > 1e-30 ? den : 1e-30);
             double ssRes = 0.0;
             for (std::size_t i = a; i < b; ++i) {
                 const double w = f.env[i] * f.env[i];
                 const double resid =
-                    f.finst[i] - (ym2 + *sl * (static_cast<double>(i) - xm));
+                    fi[i] - (ym2 + *sl * (static_cast<double>(i) - xm));
                 ssRes += w * resid * resid;
             }
             *r2 = ssTot > 1e-30 ? 1.0 - ssRes / ssTot : 0.0;
@@ -193,7 +208,9 @@ Features extractFeatures(const std::vector<std::complex<double>>& y,
         std::vector<double> gf;
         for (std::size_t i = iLo; i < iHiEff; ++i) {
             if (f.env[i] < 0.4 * me) continue;
-            gf.push_back(f.finst[i]);
+            // Auslenkung aus der geglaetteten Kurve (robust gegen Rausch-
+            // Ausreisser im rohen f_inst), Sprung aber auf rohem f_inst.
+            gf.push_back(f.finstSm[i]);
             if (i + 1 < iHiEff && f.env[i + 1] >= 0.4 * me) {
                 const double d = f.finst[i] - f.finst[i + 1];
                 if (d > dropBest) {
@@ -219,15 +236,16 @@ Features extractFeatures(const std::vector<std::complex<double>>& y,
             iPk > iLo + marg + (iHiEff - iLo) / 5 &&
             iPk < iHiEff - marg - (iHiEff - iLo) / 5) {
             double r2L = 0.0, r2R = 0.0, sL = 0.0, sR = 0.0;
-            fitHalf(iLo, iPk - marg, &r2L, &sL);
-            fitHalf(iPk + marg, iHiEff, &r2R, &sR);
+            fitHalf(f.finstSm, iLo, iPk - marg, &r2L, &sL);
+            fitHalf(f.finstSm, iPk + marg, iHiEff, &r2R, &sR);
             if (r2L > 0.0 && r2R > 0.0 && sL * sR > 0.0) {
                 f.chirpFoldR2 = std::min(r2L, r2R);
-                f.chirpFoldSweep =
-                    (std::abs(sL) * static_cast<double>(iPk - marg - iLo) +
-                     std::abs(sR) * static_cast<double>(iHiEff - iPk - marg) +
-                     dropBest) /
-                    (bw > 1e-9 ? bw : 1e-9);
+                const double foldHub =
+                    std::abs(sL) * static_cast<double>(iPk - marg - iLo) +
+                    std::abs(sR) * static_cast<double>(iHiEff - iPk - marg) +
+                    dropBest;
+                f.chirpFoldSweep = foldHub / (bw > 1e-9 ? bw : 1e-9);
+                f.chirpFoldSweepAbs = foldHub;
             }
         }
     }
