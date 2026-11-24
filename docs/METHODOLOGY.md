@@ -131,10 +131,11 @@ Zwei Anpassungen heben die untere SNR-Grenze von 6 dB auf ~2 dB:
   werden verschmolzen, damit schwache Breitbandsignale nicht in Fragmente
   zerfallen.
 
-Verifizierte untere Grenzen je Typ (Testsuite, Abschnitt 14): CW ~0-2 dB,
-Chirp ~2-3 dB, BPSK/QPSK mit langen Pulsen ~2-4 dB, QAM16 ~4 dB; FSK2 und
-OFDM brauchen weiterhin >= 6-8 dB. Reines Rauschen erzeugt auch bei 2 dB
-keine Pulse (kein False-Positive durch die Brücke).
+Verifizierte untere Grenzen je Typ (Testsuite, Abschnitte 14 und 24): CW
+~0-2 dB, Chirp ~0 dB (breiter Hub 0.40 bis -2 dB; die Chirp-Fits laufen auf
+der geglaetteten f_inst, siehe unten), BPSK/QPSK mit langen Pulsen ~2-4 dB,
+QAM16 ~4 dB; FSK2 und OFDM brauchen weiterhin >= 6-8 dB. Reines Rauschen
+erzeugt auch bei niedrigem SNR keine Chirp-Fehlalarme (Abschnitt 24).
 
 ## Analyse-API (PSK-Synchronisation, Chirp-Parameter, Symbole)
 
@@ -175,8 +176,14 @@ Auf jedem (Band, Crop):
   einem Chirp. Trennt weiterhin BPSK (Phasensprünge mitteln den Zeiger
   weg) vom unmodulierten Träger.
 - Momentanfrequenz: kontinuierliche Phase, Median-Restträger-Entfernung.
-- Chirp-Fit: lineare Regression auf f_inst, hüllkurven²-gewichtet,
-  mittlere 80 % des Pulses; Bestimmtheitsmaß r² und Hub/Bandbreite.
+- Chirp-Fit: lineare Regression auf der geglaetteten f_inst (`finstSm`,
+  gleitendes Mittel über ~n/32 Samples, O(n)) — robust gegen Ausreißer/
+  Entpackungsfehler bei stark verrauschtem f_inst; hüllkurven²-gewichtet,
+  mittlere 80 % des Pulses. Ausgabe: r², Hub/Bandbreite (`chirpSweep`)
+  und Hub absolut (`chirpSweepAbs`, greift wenn das Band die ganze
+  Segmentbreite umfasst, z. B. Fallback-Band bei niedrigem SNR).
+  Gefaltener Chirp (P3): Saegezahn-Erkennung (größter Abfall auf rohem
+  f_inst, Auslenkung aus geglaettetem), zwei lineare Haelften auf finstSm.
 - f_inst-Moden: Histogramm (24 Bins, nur Hüllkurve > 0.4 * Mittel;
   Randnormalisierung /3 wie Referenz), zusammenhängende Bins über 35 % des
   Maximums bilden eine Mode; Konzentration der Masse um die Top-2-Moden.
@@ -190,7 +197,9 @@ Reihenfolge (jede Regel schließt ab):
    Bandbreite; der Splatter benachbarter Pulse darf einen CW-Puls nicht in
    die Phasenanalyse drängen.
 3. Schmalband (<= 14 Bins): Frequenz-Pfad.
-4. Chirp: r² > 0.70 und Hub > 0.50 der Bandbreite: Frequenz-Pfad.
+4. Chirp: r² > 0.65 und (Hub > 0.50 der Bandbreite ODER Hub absolut
+   > 0.06 cycles/sample); gefalteter Chirp (Saegezahn) analog mit
+   r² > 0.50 je Haelfte: Frequenz-Pfad.
 5. FSK: mindestens 2 f_inst-Moden mit Konzentration > 0.55.
 6. Flächig: fenstergemitteltes PAPR > 6 dB und CV > 0.40 (OFDM-Gruppe).
 7. sonst: Phasen-Pfad.

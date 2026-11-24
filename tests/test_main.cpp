@@ -44,6 +44,15 @@
 //      abstaendig, lange Runs, R^2 der Stufen-Mitten), M=8/16 bei 20/15 dB,
 //      Mehrpuls-Szene Frank+CW, Analyse-API analyzeFrank (Ordnung, Chip-Rate,
 //      Code-Phasen); Chirp/FSK2/QPSK duerfen nicht als FrankCode durchgehen
+//  22. P-Codes P1..P4 (anknuepfend an Frank): P1/P2 -> PCode (f_inst-Treppe +
+//      Matched-Filter der Phasen-Gesetze, Subtyp/Ordnung via analyzePcode),
+//      P3/P4 -> Chirp (P3 gefaltet als Saegezahn); Negativtest FSK2
+//  23. Barker-Codes (BPSK mit Barker-Folge 7/11/13, wiederholt) ->
+//      BarkerCode via barkerMatchSlice + analyzeBarker; Negativtest BPSK
+//  24. Chirp bei stark verrauschter f_inst (niedriges SNR): Chirp-Fit auf
+//      geglaetteter f_inst (finstSm) + absoluter Hub (chirpSweepAbs);
+//      Chirps bei 0 dB (bw 0.10-0.40, up/dn, 3 Seeds), bw 0.40 bei -2 dB;
+//      Negativ: FSK2/Rauschen bei 0 dB nie Chirp
 //
 // Ein Szenario besteht genau dann den Test, wenn die sortierte Labelmenge
 // der erkannten Pulse der erwarteten entspricht. Fuer
@@ -2079,6 +2088,98 @@ int main() {
                             "barker-neg-bpsk");
             } else {
                 std::printf("[FAIL] %-24s %d/4\n", "barker-neg-bpsk", okc);
+            }
+        }
+    }
+    // 24. Chirp bei stark verrauschter Momentanfrequenz (niedriges SNR):
+    //     Der Chirp-Fit laeuft auf der geglaetteten f_inst (finstSm,
+    //     gleitendes Mittel ~n/32), der Hub wird zusaetzlich absolut
+    //     geprueft (chirpSweepAbs), damit Chirps auch dann erkannt werden,
+    //     wenn das Band die ganze Segmentbreite umfasst (Fallback-Band).
+    {
+        for (int upI = 0; upI < 2; ++upI) {
+            const bool up = upI == 0;
+            for (double bw : {0.10, 0.25, 0.40}) {
+                for (double snr : {2.0, 0.0}) {
+                    for (int seed = 1; seed <= 3; ++seed) {
+                        char name[64];
+                        std::snprintf(name, sizeof(name),
+                                      "lowsnr-chirp-%s-bw%.2f-%ddB-s%d",
+                                      up ? "up" : "dn", bw,
+                                      static_cast<int>(snr), seed);
+                        std::mt19937 rng(900 + seed);
+                        iqtest::Recorder rec;
+                        rec.silence(2000);
+                        rec.add(iqtest::genChirp(4000, bw, up), -0.10, snr);
+                        rec.silence(2000);
+                        scenario(name, rec.buffer(), "Chirp");
+                    }
+                }
+            }
+        }
+        // breiter Chirp (bw=0.40) noch bei -2 dB (alle Seeds Chirp)
+        for (int seed = 1; seed <= 3; ++seed) {
+            char name[64];
+            std::snprintf(name, sizeof(name), "lowsnr-chirp-bw0.40--2dB-s%d",
+                          seed);
+            std::mt19937 rng(900 + seed);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genChirp(4000, 0.40, true), -0.10, -2.0);
+            rec.silence(2000);
+            scenario(name, rec.buffer(), "Chirp");
+        }
+        // Negativ: FSK2 und reines Rauschen bei 0 dB duerfen nicht als
+        // Chirp durchgehen (kein Puls mit Label Chirp).
+        for (int seed = 1; seed <= 3; ++seed) {
+            ++g_total;
+            std::mt19937 rng(950 + seed);
+            iqtest::Recorder rec;
+            rec.silence(2000);
+            rec.add(iqtest::genFsk2(rng, 1024, 8), 0.10, 0.0);
+            rec.silence(2000);
+            iqclassify::ClassifierConfig cfg;
+            iqclassify::ModulationClassifier clf(cfg);
+            const auto res = clf.classify(rec.buffer().data(), rec.buffer().size());
+            bool noChirp = true;
+            for (const auto& r : res)
+                if (r.modulation == iqclassify::ModulationType::Chirp)
+                    noChirp = false;
+            if (noChirp) {
+                ++g_ok;
+                std::printf("[OK ] %-24s s%d: kein Chirp (n=%zu)\n",
+                            "chirp-neg-fsk2-0dB", seed, res.size());
+            } else {
+                std::printf("[FAIL] %-24s s%d: FSK2 als Chirp\n",
+                            "chirp-neg-fsk2-0dB", seed);
+                for (const auto& r : res) printPulse(r);
+            }
+        }
+        for (int seed = 1; seed <= 2; ++seed) {
+            ++g_total;
+            std::mt19937 rng(980 + seed);
+            iqtest::Recorder rec;
+            rec.silence(4000);
+            std::normal_distribution<double> nd(0.0, 1.0);
+            std::vector<iqtest::cd> noise(8000);
+            for (auto& v : noise) v = iqtest::cd(nd(rng), nd(rng));
+            rec.add(noise, 0.0, 1000.0);
+            rec.silence(2000);
+            iqclassify::ClassifierConfig cfg;
+            iqclassify::ModulationClassifier clf(cfg);
+            const auto res = clf.classify(rec.buffer().data(), rec.buffer().size());
+            bool noChirp = true;
+            for (const auto& r : res)
+                if (r.modulation == iqclassify::ModulationType::Chirp)
+                    noChirp = false;
+            if (noChirp) {
+                ++g_ok;
+                std::printf("[OK ] %-24s s%d: kein Chirp (n=%zu)\n",
+                            "chirp-neg-noise", seed, res.size());
+            } else {
+                std::printf("[FAIL] %-24s s%d: Rauschen als Chirp\n",
+                            "chirp-neg-noise", seed);
+                for (const auto& r : res) printPulse(r);
             }
         }
     }

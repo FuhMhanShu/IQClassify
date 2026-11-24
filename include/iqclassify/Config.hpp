@@ -83,8 +83,13 @@ struct ClassifierConfig {
     double tCwFthr = 0.004;      // |f_inst|-Toleranz der Tonentscheidung
     double tCwFrac = 0.70;       // Anteil der Samples innerhalb der Toleranz
     double tCwCoh = 0.85;        // Notwendige Traegerkohaerenz fuer einen Ton
-    double tChirpR2 = 0.70;      // Chirp-Fitqualitaet
+    double tChirpR2 = 0.65;      // Chirp-Fitqualitaet (auf geglaetteter f_inst)
     double tChirpSweep = 0.50;   // Chirp-Hubanteil der Bandbreite
+    double tChirpFoldR2 = 0.50;  // R^2-Schwelle fuer die beiden Saegezahn-
+                                 // Haelften (etwas lockerer als tChirpR2)
+    double tChirpSweepAbs = 0.06;  // Chirp-Hub absolut (cycles/sample); greift
+                                   // wenn das Band die ganze Segmentbreite
+                                   // umfasst (Fallback-Band bei niedrigem SNR)
     double tModeConc = 0.55;     // f_inst-Modenkonzentration (FSK)
     // ---- Frank-Code (polyphase Radar-Code): Treppe der Momentanfrequenz
     int tFrankMinModes = 3;      // Mindestanzahl Stufen (Ordnung M >= 3)

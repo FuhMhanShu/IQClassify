@@ -33,17 +33,25 @@ struct Features {
                                 // akkumulierten Phase)
     std::vector<double> finst;  // momentane Frequenz (n-1 Werte),
                                 // Resttraeger entfernt
+    // geglaettete Momentanfrequenz (gleitendes Mittel ueber ~n/32 Samples):
+    // robust gegen Ausreisser/Entpackungsfehler bei stark verrauschtem
+    // f_inst; Chirp-Fits laufen auf dieser Kurve.
+    std::vector<double> finstSm;
     double residF = 0.0;        // entfernte Resttraegerfrequenz
     double carrCoh = 0.0;        // |mean(z)| / mean(|z|)
     double cv = 0.0;
     double paprDb = 0.0;
     double paprWDb = 0.0;
     double chirpR2 = 0.0;
-    double chirpSweep = 0.0;
+    double chirpSweep = 0.0;      // Hub relativ zur Bandbreite
+    double chirpSweepAbs = 0.0;   // Hub absolut (cycles/sample) — fuer den
+                                   // Fall, dass das Band die ganze Segment-
+                                   // Breite umfasst (Fallback-Band)
     // gefalteter Chirp (V-Form von f_inst, z. B. P3-Code nach Faltung):
     // R^2 der beiden linearen Haelften (min) und Gesamthub relativ zur BW.
     double chirpFoldR2 = 0.0;
     double chirpFoldSweep = 0.0;
+    double chirpFoldSweepAbs = 0.0;
     double dwell = 0.0;
     double dwellThr = 0.0;
     int nfreqModes = 0;

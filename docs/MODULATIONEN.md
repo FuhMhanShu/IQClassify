@@ -84,8 +84,13 @@ dominante Moden. Symbol-Takt aus den Umschaltspitzen von `|Delta f_inst|`
 (`symbolFreqs`, `fskTone`).
 
 ### Chirp (inkl. P3/P4-Codes)
-Linearer Frequenzsweep: `f_inst` steigt (oder faellt) linear ueber den Puls
-(env^2-gewichteter Fit, R^2). Grosser Hub relativ zur Bandbreite.
+Linearer Frequenzsweep: `f_inst` steigt (oder faellt) linear ueber den Puls.
+Der Fit laeuft auf der **geglaetteten** `f_inst` (`finstSm`, gleitendes Mittel
+ueber ~n/32 Samples) — dadurch bleibt die Erkennung auch bei stark verrauschtem
+`f_inst` (niedrigem SNR) stabil: Chirps werden bis ~0 dB erkannt (breiter Hub
+0.40 bis -2 dB, Testsuite Abschnitt 24). Der Hub wird zusaetzlich absolut
+gemessen (`chirpSweepAbs`), damit ein Chirp auch dann erkannt wird, wenn das
+detektierte Band bei niedrigem SNR die ganze Segmentbreite umfasst.
 **P3/P4-Codes** (Laenge M, Chip-Phase ~ pi*m^2/M) sind Chirps; P3 erscheint
 durch die Faltung am Chip-Rand (Phasensprung > pi pro Chip) als **Saegezahn**
 in `f_inst` und wird ueber den gefalteten Chirp-Test erkannt (grosser Abfall

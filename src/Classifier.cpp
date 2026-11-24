@@ -1320,9 +1320,12 @@ bool stage1(const Features& f, const ClassifierConfig& cfg,
         *out = CoarseClass::FrequencyModulated;
         return true;
     }
-    if ((f.chirpR2 > cfg.tChirpR2 && f.chirpSweep > cfg.tChirpSweep) ||
-        (f.chirpFoldR2 > cfg.tChirpR2 &&
-         f.chirpFoldSweep > cfg.tChirpSweep)) {
+    if ((f.chirpR2 > cfg.tChirpR2 &&
+         (f.chirpSweep > cfg.tChirpSweep ||
+          f.chirpSweepAbs > cfg.tChirpSweepAbs)) ||
+        (f.chirpFoldR2 > cfg.tChirpFoldR2 &&
+         (f.chirpFoldSweep > cfg.tChirpSweep ||
+          f.chirpFoldSweepAbs > cfg.tChirpSweepAbs))) {
         *out = CoarseClass::FrequencyModulated;
         return true;
     }
@@ -1577,9 +1580,12 @@ std::pair<ModulationType, double> stage2(const Features& f,
             if (law != 0) return {ModulationType::PCode, conf};
             return {ModulationType::FrankCode, conf};
         }
-        if ((f.chirpR2 > cfg.tChirpR2 && f.chirpSweep > cfg.tChirpSweep) ||
-        (f.chirpFoldR2 > cfg.tChirpR2 &&
-         f.chirpFoldSweep > cfg.tChirpSweep)) {
+        if ((f.chirpR2 > cfg.tChirpR2 &&
+         (f.chirpSweep > cfg.tChirpSweep ||
+          f.chirpSweepAbs > cfg.tChirpSweepAbs)) ||
+        (f.chirpFoldR2 > cfg.tChirpFoldR2 &&
+         (f.chirpFoldSweep > cfg.tChirpSweep ||
+          f.chirpFoldSweepAbs > cfg.tChirpSweepAbs))) {
             return {ModulationType::Chirp,
                     std::min(0.98, 0.5 + 0.45 * f.chirpR2)};
         }
